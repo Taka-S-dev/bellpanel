@@ -1,0 +1,31 @@
+# Allowlist: everything is ignored unless a path below brings it back.
+*
+!*/
+!/.gitignore
+!/Cargo.toml
+!/Cargo.lock
+!/README.md
+!/LICENSE
+!/docs/**
+!/src/**
+!/spike/FINDINGS.md
+!/spike/log-event.mjs
+!/spike/focus-probe/Cargo.toml
+!/spike/focus-probe/Cargo.lock
+!/spike/focus-probe/src/**
+
+# Never, even inside the paths above.
+.env
+.env.*
+*.pem
+*.key
+id_rsa*
+id_ed25519*
+secrets.json
+credentials.*
+# The spike's scratch folder holds a git repository of its own.
+/spike/sandbox/
+# Bellpanel's own data, if BELLPANEL_HOME ever points inside the repo
+*.jsonl
+settings.json
+hook-errors.log

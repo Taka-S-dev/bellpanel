@@ -1,0 +1,40 @@
+[package]
+name = "bellpanel"
+version = "0.1.0"
+edition = "2021"
+description = "Terminal dashboard for Claude Code, Copilot CLI and Codex sessions"
+license = "MIT"
+publish = false
+
+[[bin]]
+name = "bellpanel"
+path = "src/main.rs"
+
+[[bin]]
+name = "bellpanel-hook"
+path = "src/bin/bellpanel-hook.rs"
+
+[dependencies]
+ratatui = "0.30"
+serde = { version = "1", features = ["derive"] }
+serde_json = { version = "1", features = ["preserve_order"] }
+unicode-width = "0.2"
+
+[target.'cfg(windows)'.dependencies]
+windows = { version = "0.61", features = [
+    "Wdk_System_Threading",
+    "Win32_Foundation",
+    "Win32_System_Com",
+    "Win32_System_Console",
+    "Win32_System_Ole",
+    "Win32_System_Variant",
+    "Win32_UI_Accessibility",
+    "Win32_System_Diagnostics_Debug",
+    "Win32_System_Kernel",
+    "Win32_System_Diagnostics_ToolHelp",
+    "Win32_System_Threading",
+    "Win32_UI_WindowsAndMessaging",
+] }
+
+[profile.release]
+strip = true

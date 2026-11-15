@@ -1,0 +1,1225 @@
+//! bellpanel: the dashboard, plus `install` / `uninstall`. See docs/DESIGN.md.
+
+use std::io::{self, Write};
+use std::sync::mpsc;
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
+
+use bellpanel::event::{plain, Agent, Kind};
+use bellpanel::state::{Board, Key, Mark, Order, Session, Slot, State};
+use bellpanel::store::{self, Tail};
+use bellpanel::{host, install};
+use ratatui::crossterm::event::{
+    self, DisableMouseCapture, EnableMouseCapture, Event as TermEvent, KeyCode, KeyEventKind,
+    KeyModifiers, MouseButton, MouseEventKind,
+};
+use ratatui::crossterm::execute;
+use ratatui::layout::{Constraint, Layout, Rect};
+use ratatui::style::{Color, Modifier, Style};
+use ratatui::text::{Line, Span};
+use ratatui::widgets::{Block, List, ListItem, ListState, Paragraph};
+use unicode_width::UnicodeWidthChar;
+
+const TICK: Duration = Duration::from_millis(250);
+const SPINNER: [&str; 4] = ["◐", "◓", "◑", "◒"];
+/// The timeline column: one slot per minute, up to the last half hour.
+const TIMELINE_SLOTS: usize = 30;
+const SLOT_MS: u64 = 60_000;
+/// Columns a row needs before the timeline: state, agent, app, folder, age, borders.
+const ROW_FIXED_WIDTH: usize = 50;
+/// Columns kept for the prompt or reply, which matter more than the timeline.
+const ROW_TEXT_MIN_WIDTH: usize = 16;
+/// Fewer minutes than this is not worth showing.
+const TIMELINE_MIN_SLOTS: usize = 10;
+
+/// How many minutes of timeline fit, or 0 to leave it out.
+fn timeline_slots(width: u16, icons: bool) -> usize {
+    let fixed = ROW_FIXED_WIDTH + if icons { ICON_WIDTH } else { 0 };
+    let room = (width as usize).saturating_sub(fixed + 2 + ROW_TEXT_MIN_WIDTH);
+    let slots = room.min(TIMELINE_SLOTS);
+    if slots >= TIMELINE_MIN_SLOTS {
+        slots
+    } else {
+        0
+    }
+}
+/// The footer when nothing else is shown: short enough for a narrow pane.
+const HELP: &str = "click a folder to open · ? keys · q quit";
+/// The full list, shown by `?`.
+const KEYS: [(&str, &str); 10] = [
+    (
+        "click folder, Enter",
+        "bring that session's window and tab forward",
+    ),
+    ("click row, j / k", "select"),
+    ("Space", "mark a finished session as seen"),
+    ("d", "hide the row until the session does something new"),
+    ("e", "event log: selected session, every session, hidden"),
+    ("s", "order: as they appeared, or by urgency"),
+    ("i", "Nerd Font icons on or off"),
+    ("wheel", "move the selection"),
+    ("?", "this list"),
+    ("q, Esc", "quit"),
+];
+/// How long an ordinary status message stays; errors stay three times as long.
+const STATUS_SECS: u64 = 5;
+/// Where the folder name starts in a row: after the state (7), agent (8) and
+/// app (5) columns; the agent column is two wider with icons.
+fn folder_column(icons: bool) -> u16 {
+    21 + if icons { ICON_WIDTH as u16 } else { 0 }
+}
+const APP_WIDTH: usize = 4;
+const AGENT_WIDTH: usize = 7;
+/// An icon and the space after it.
+const ICON_WIDTH: usize = 2;
+const FOLDER_WIDTH: usize = 20;
+
+fn main() {
+    let args: Vec<String> = std::env::args().skip(1).collect();
+    let dry_run = args.iter().any(|a| a == "--dry-run");
+    let result = match args.first().map(String::as_str) {
+        None => run_dashboard(),
+        Some("install") => match chosen_agents(&args) {
+            Ok(agents) => run_install(true, dry_run, agents),
+            Err(e) => Err(io::Error::new(io::ErrorKind::InvalidInput, e)),
+        },
+        Some("uninstall") => run_install(false, dry_run, None),
+        // Internal: run by the dashboard in a process of its own, since reading
+        // another console's title means detaching from this one.
+        Some("console-title") => {
+            if let Some(title) = args
+                .get(1)
+                .and_then(|pid| pid.parse().ok())
+                .and_then(bellpanel::tabs::attach_and_read_title)
+            {
+                print!("{title}");
+            }
+            Ok(())
+        }
+        // Troubleshooting: open the window (and tab) of <agent> working in <dir>.
+        Some("open") => {
+            match (args.get(1), args.get(2)) {
+                (Some(agent), Some(dir)) => {
+                    let target = host::Target {
+                        agent_exe: agent.clone(),
+                        host: None,
+                        pane: None,
+                        cwd: dir.clone(),
+                    };
+                    match host::focus_session(&target) {
+                        Ok(tab) => println!(
+                            "opened{}",
+                            tab.map(|t| format!(" · {t}")).unwrap_or_default()
+                        ),
+                        Err(e) => println!("{e}"),
+                    }
+                }
+                _ => eprintln!("usage: bellpanel open <agent-exe> <dir>"),
+            }
+            Ok(())
+        }
+        // Troubleshooting: which window would a session of <agent> in <dir> open?
+        Some("which-host") => {
+            match (args.get(1), args.get(2)) {
+                (Some(agent), Some(dir)) => match host::agent_host(agent, dir) {
+                    Some(found) => {
+                        let title = found.agent_pid.and_then(bellpanel::tabs::console_title);
+                        println!(
+                            "{} (pid {}), agent pid {:?}, tab title {title:?}",
+                            found.exe, found.pid, found.agent_pid
+                        )
+                    }
+                    None => println!("no {agent} process working in {dir} runs under a window"),
+                },
+                _ => eprintln!("usage: bellpanel which-host <agent-exe> <dir>"),
+            }
+            Ok(())
+        }
+        Some("-h" | "--help" | "help") => {
+            print_usage();
+            Ok(())
+        }
+        Some(other) => {
+            eprintln!("unknown command: {other}\n");
+            print_usage();
+            std::process::exit(2);
+        }
+    };
+    if let Err(e) = result {
+        eprintln!("bellpanel: {e}");
+        std::process::exit(1);
+    }
+}
+
+fn print_usage() {
+    println!(
+        "bellpanel             show the dashboard\n\
+         bellpanel install     add hooks to the agents found here (Claude Code, Copilot CLI, Codex)\n\
+         bellpanel uninstall   remove them\n\
+         \n  --dry-run           print what would change, write nothing\n\
+           --agents a,b        install for these agents only (claude, copilot, codex)\n\
+         \nEvents: {}",
+        store::events_path().display()
+    );
+}
+
+/// `--agents claude,codex` from the command line, if given.
+fn chosen_agents(args: &[String]) -> Result<Option<Vec<Agent>>, String> {
+    let value = args
+        .iter()
+        .position(|a| a == "--agents")
+        .map(|i| args.get(i + 1).cloned().unwrap_or_default())
+        .or_else(|| {
+            args.iter()
+                .find_map(|a| a.strip_prefix("--agents=").map(str::to_string))
+        });
+    let Some(value) = value else { return Ok(None) };
+    value
+        .split(',')
+        .map(|name| {
+            Agent::parse(name.trim())
+                .ok_or_else(|| format!("unknown agent `{name}`; use claude, copilot, codex"))
+        })
+        .collect::<Result<Vec<_>, _>>()
+        .map(Some)
+}
+
+fn run_install(install: bool, dry_run: bool, chosen: Option<Vec<Agent>>) -> io::Result<()> {
+    let exe = install::installed_hook_path();
+    let agents = chosen.clone().unwrap_or_else(install::present_agents);
+    if install {
+        for agent in Agent::ALL.into_iter().filter(|a| !agents.contains(a)) {
+            if chosen.is_some() {
+                println!("skip {}: not chosen", agent.name());
+            } else {
+                println!(
+                    "skip {}: no ~/.{} folder, so it does not look installed",
+                    agent.name(),
+                    agent.name()
+                );
+            }
+        }
+    }
+    let changes = install::plan(install.then_some(exe.as_path()), &agents)?;
+    if changes.is_empty() {
+        println!("Nothing to change.");
+    }
+    for change in &changes {
+        let verb = match (&change.before, &change.after) {
+            (None, _) => "create",
+            (_, None) => "delete",
+            _ => "update",
+        };
+        println!("{verb} {}", change.path.display());
+        if dry_run {
+            if let Some(after) = &change.after {
+                println!("{after}");
+            }
+        }
+    }
+    if dry_run {
+        if install {
+            println!("would copy bellpanel-hook to {}", exe.display());
+        }
+        return Ok(());
+    }
+    if install {
+        let copied = install::copy_hook_binary()?;
+        println!("copied hook to {}", copied.display());
+        for file in install::migrate_legacy_data()? {
+            println!("carried over {}", file.display());
+        }
+    }
+    install::apply(&changes)?;
+    if install {
+        println!("\nDone. Restart running agents so they read their hooks.");
+        if agents.contains(&Agent::Codex) {
+            println!(
+                "Codex runs new hooks only after you trust them: open `codex` and use /hooks."
+            );
+        }
+    }
+    Ok(())
+}
+
+fn now_ms() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_millis() as u64)
+        .unwrap_or(0)
+}
+
+fn age(now: u64, at: u64) -> String {
+    let secs = now.saturating_sub(at) / 1000;
+    match secs {
+        0..60 => format!("{secs}s"),
+        60..3600 => format!("{}m", secs / 60),
+        3600..86_400 => format!("{}h", secs / 3600),
+        _ => format!("{}d", secs / 86_400),
+    }
+}
+
+fn agent_color(agent: Agent) -> Color {
+    match agent {
+        Agent::Claude => Color::Rgb(217, 119, 87),
+        Agent::Copilot => Color::Rgb(120, 140, 255),
+        Agent::Codex => Color::Rgb(16, 163, 127),
+    }
+}
+
+const LINK_COLOR: Color = Color::Rgb(110, 170, 255);
+const SELECTED_BG: Color = Color::Rgb(58, 64, 78);
+const WAIT_COLOR: Color = Color::Rgb(240, 180, 40);
+const DONE_COLOR: Color = Color::Rgb(90, 200, 120);
+const ERROR_COLOR: Color = Color::Rgb(230, 90, 90);
+
+/// What the event log under the sessions shows.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "lowercase")]
+enum EventsMode {
+    /// The selected session's prompts and replies.
+    #[default]
+    Selected,
+    /// Every session's events in one stream.
+    All,
+    /// No log: the sessions get the whole pane.
+    Off,
+}
+
+impl EventsMode {
+    fn next(self) -> EventsMode {
+        match self {
+            EventsMode::Selected => EventsMode::All,
+            EventsMode::All => EventsMode::Off,
+            EventsMode::Off => EventsMode::Selected,
+        }
+    }
+
+    fn label(self) -> &'static str {
+        match self {
+            EventsMode::Selected => "events: the selected session",
+            EventsMode::All => "events: every session",
+            EventsMode::Off => "events: hidden",
+        }
+    }
+}
+
+/// Preferences kept in `settings.json`. Unknown or missing fields fall back
+/// to their defaults, so an old or hand-edited file still loads.
+#[derive(Default, serde::Serialize, serde::Deserialize)]
+#[serde(default)]
+struct Settings {
+    sort: Order,
+    events: EventsMode,
+    /// Nerd Font icons next to agent names. Off by default: the dashboard
+    /// cannot tell which font the terminal draws with, and without the
+    /// glyphs every icon is an empty box.
+    icons: bool,
+}
+
+impl Settings {
+    fn load() -> Settings {
+        std::fs::read_to_string(store::settings_path())
+            .ok()
+            .and_then(|text| serde_json::from_str(&text).ok())
+            .unwrap_or_default()
+    }
+
+    fn save(&self) -> io::Result<()> {
+        let path = store::settings_path();
+        if let Some(dir) = path.parent() {
+            std::fs::create_dir_all(dir)?;
+        }
+        std::fs::write(
+            path,
+            serde_json::to_string_pretty(self).map_err(io::Error::other)?,
+        )
+    }
+}
+
+struct App {
+    settings: Settings,
+    /// Agents whose config calls our hook, read once at start-up.
+    agents: Vec<Agent>,
+    board: Board,
+    tail: Tail,
+    selected: Option<Key>,
+    /// Keys of the rows on screen, top to bottom, from the last draw.
+    visible: Vec<Key>,
+    /// Display width of each row's folder link, matching `visible`.
+    visible_folder_widths: Vec<usize>,
+    /// Screen area of the list's rows, from the last draw.
+    rows_area: Rect,
+    list_offset: usize,
+    status: Option<(String, bool)>,
+    /// The status as last seen, and since when, to let it fade.
+    status_seen: Option<((String, bool), std::time::Instant)>,
+    /// The key list from `?` is open.
+    show_keys: bool,
+    /// The row whose folder link is under the pointer.
+    hover: Option<usize>,
+    /// A window being brought forward on another thread; its status line.
+    opening: Option<mpsc::Receiver<(String, bool)>>,
+    tick: usize,
+}
+
+fn run_dashboard() -> io::Result<()> {
+    let mut app = App {
+        settings: Settings::load(),
+        agents: install::installed_agents(),
+        board: Board::default(),
+        tail: Tail::open(store::events_path()),
+        selected: None,
+        visible: Vec::new(),
+        visible_folder_widths: Vec::new(),
+        rows_area: Rect::default(),
+        list_offset: 0,
+        status: None,
+        hover: None,
+        opening: None,
+        status_seen: None,
+        show_keys: false,
+        tick: 0,
+    };
+    // Replay what is already there without ringing for it, then what the
+    // user had already dealt with.
+    for event in app.tail.read_new()? {
+        app.board.apply(&event);
+    }
+    for mark in store::read_all::<Mark>(&store::marks_path()) {
+        app.board.apply_mark(&mark);
+    }
+
+    let mut terminal = ratatui::init();
+    execute!(io::stdout(), EnableMouseCapture)?;
+    let result = event_loop(&mut terminal, &mut app);
+    let _ = execute!(io::stdout(), DisableMouseCapture);
+    ratatui::restore();
+    result
+}
+
+fn event_loop(terminal: &mut ratatui::DefaultTerminal, app: &mut App) -> io::Result<()> {
+    loop {
+        if let Some(rx) = &app.opening {
+            match rx.try_recv() {
+                Ok(status) => {
+                    app.status = Some(status);
+                    app.opening = None;
+                }
+                Err(mpsc::TryRecvError::Empty) => {}
+                Err(mpsc::TryRecvError::Disconnected) => app.opening = None,
+            }
+        }
+        let mut ring = false;
+        match app.tail.read_new() {
+            Ok(events) => {
+                for event in events {
+                    ring |= app.board.apply(&event);
+                }
+            }
+            Err(e) => {
+                app.status = Some((
+                    format!("cannot read {}: {e}", app.tail.path().display()),
+                    true,
+                ))
+            }
+        }
+        fade_status(app);
+        terminal.draw(|frame| draw(frame, app))?;
+        if ring {
+            // terminal-pane turns BEL into a tab mark and a taskbar flash.
+            let mut out = io::stdout();
+            let _ = out.write_all(b"\x07");
+            let _ = out.flush();
+        }
+        app.tick = app.tick.wrapping_add(1);
+
+        if !event::poll(TICK)? {
+            continue;
+        }
+        match event::read()? {
+            // With the key list open, any key just closes it.
+            TermEvent::Key(key) if key.kind == KeyEventKind::Press && app.show_keys => {
+                app.show_keys = false
+            }
+            TermEvent::Key(key) if key.kind == KeyEventKind::Press => {
+                let ctrl_c =
+                    key.code == KeyCode::Char('c') && key.modifiers.contains(KeyModifiers::CONTROL);
+                match key.code {
+                    _ if ctrl_c => return Ok(()),
+                    KeyCode::Char('q') | KeyCode::Esc => return Ok(()),
+                    KeyCode::Char('j') | KeyCode::Down => move_selection(app, 1),
+                    KeyCode::Char('k') | KeyCode::Up => move_selection(app, -1),
+                    KeyCode::Enter => open_selected(app),
+                    KeyCode::Char(' ') => {
+                        if let Some(key) = app.selected.clone() {
+                            let mark = app.board.acknowledge(&key);
+                            keep(app, mark);
+                        }
+                    }
+                    KeyCode::Char('?') => app.show_keys = true,
+                    KeyCode::Char('e') => {
+                        app.settings.events = app.settings.events.next();
+                        let shown = app.settings.events.label();
+                        app.status = Some(match app.settings.save() {
+                            Ok(()) => (shown.to_string(), false),
+                            Err(e) => (format!("{shown}, but could not save it: {e}"), true),
+                        });
+                    }
+                    KeyCode::Char('i') => {
+                        app.settings.icons = !app.settings.icons;
+                        let shown = if app.settings.icons {
+                            "icons on (needs Nerd Fonts 3.5 or later)"
+                        } else {
+                            "icons off"
+                        };
+                        app.status = Some(match app.settings.save() {
+                            Ok(()) => (shown.to_string(), false),
+                            Err(e) => (format!("{shown}, but could not save it: {e}"), true),
+                        });
+                    }
+                    KeyCode::Char('s') => {
+                        app.settings.sort = match app.settings.sort {
+                            Order::Fixed => Order::Urgency,
+                            Order::Urgency => Order::Fixed,
+                        };
+                        let label = sort_label(app.settings.sort);
+                        app.status = Some(match app.settings.save() {
+                            Ok(()) => (format!("sorted {label}"), false),
+                            Err(e) => (format!("sorted {label}, but could not save it: {e}"), true),
+                        });
+                    }
+                    KeyCode::Char('d') => {
+                        if let Some(key) = app.selected.take() {
+                            let mark = app.board.dismiss(&key);
+                            keep(app, mark);
+                        }
+                    }
+                    _ => {}
+                }
+            }
+            // Mouse-up, not mouse-down: acting on the press lets Obsidian take
+            // the focus back on release (spike/FINDINGS.md).
+            TermEvent::Mouse(mouse) if mouse.kind == MouseEventKind::Up(MouseButton::Left) => {
+                if let Some((index, on_folder)) = hit(app, mouse.column, mouse.row) {
+                    app.selected = app.visible.get(index).cloned();
+                    // Only the folder name is a link. A click anywhere else
+                    // just selects, so clicking into the pane to give it the
+                    // keyboard never switches windows.
+                    if on_folder {
+                        open_selected(app);
+                    }
+                }
+            }
+            TermEvent::Mouse(mouse) if mouse.kind == MouseEventKind::Moved => {
+                let hover = hit(app, mouse.column, mouse.row)
+                    .filter(|&(_, on_folder)| on_folder)
+                    .map(|(i, _)| i);
+                if hover != app.hover {
+                    // The last message was about something else; make room for the hint.
+                    if hover.is_some() {
+                        app.status = None;
+                    }
+                    app.hover = hover;
+                }
+            }
+            TermEvent::Mouse(mouse) if mouse.kind == MouseEventKind::ScrollDown => {
+                move_selection(app, 1)
+            }
+            TermEvent::Mouse(mouse) if mouse.kind == MouseEventKind::ScrollUp => {
+                move_selection(app, -1)
+            }
+            _ => {}
+        }
+    }
+}
+
+/// The row under a screen position, and whether the position is on that
+/// row's folder link.
+fn hit(app: &App, column: u16, row: u16) -> Option<(usize, bool)> {
+    let area = app.rows_area;
+    let inside = column >= area.x
+        && column < area.x + area.width
+        && row >= area.y
+        && row < area.y + area.height;
+    if !inside {
+        return None;
+    }
+    let index = (row - area.y) as usize + app.list_offset;
+    let width = *app.visible_folder_widths.get(index)?;
+    let column = column - area.x;
+    let start = folder_column(app.settings.icons);
+    Some((index, column >= start && column < start + width as u16))
+}
+
+/// How the window a session opens in is named in the hint.
+fn host_name(exe: &str) -> String {
+    match exe.to_lowercase().as_str() {
+        "code" => "VS Code".into(),
+        "code - insiders" => "VS Code Insiders".into(),
+        "windowsterminal" => "Windows Terminal".into(),
+        "wezterm-gui" => "WezTerm".into(),
+        "obsidian" => "Obsidian".into(),
+        _ => exe.to_string(),
+    }
+}
+
+/// The app a session runs in, short enough for its own column. Several
+/// sessions often share a folder; this tells them apart at a glance.
+fn host_short(exe: Option<&str>) -> String {
+    let Some(exe) = exe else { return "-".into() };
+    match exe.to_lowercase().as_str() {
+        "code" | "code - insiders" => "code".into(),
+        "windowsterminal" => "wt".into(),
+        "wezterm-gui" => "wez".into(),
+        "obsidian" => "obs".into(),
+        "cursor" => "cur".into(),
+        other => other.chars().take(APP_WIDTH).collect(),
+    }
+}
+
+fn move_selection(app: &mut App, step: isize) {
+    if app.visible.is_empty() {
+        return;
+    }
+    let current = app
+        .selected
+        .as_ref()
+        .and_then(|k| app.visible.iter().position(|v| v == k));
+    let next = match current {
+        None => 0,
+        Some(i) => (i as isize + step).clamp(0, app.visible.len() as isize - 1) as usize,
+    };
+    app.selected = Some(app.visible[next].clone());
+}
+
+/// Clears a status message once it has been up long enough. A message
+/// counts from when it first appeared; one still being worked on
+/// ("opening…") stays.
+fn fade_status(app: &mut App) {
+    let now = std::time::Instant::now();
+    match (&app.status, &app.status_seen) {
+        (None, _) => app.status_seen = None,
+        (Some(current), Some((seen, _))) if current == seen => {}
+        (Some(current), _) => app.status_seen = Some((current.clone(), now)),
+    }
+    if let Some(((_, is_error), since)) = &app.status_seen {
+        let limit = STATUS_SECS * if *is_error { 3 } else { 1 };
+        if app.opening.is_none() && now.duration_since(*since).as_secs() >= limit {
+            app.status = None;
+            app.status_seen = None;
+        }
+    }
+}
+
+/// Starts bringing the selected session's window (and tab) forward.
+///
+/// That can take a second or two (a helper process, `wezterm cli`, waiting to
+/// see the focus stick), so it runs on its own thread. Done on this one, the
+/// dashboard froze, and the pointer moves and clicks made meanwhile were all
+/// handled at once afterwards: the selection jumped, clicks and hover were lost.
+fn open_selected(app: &mut App) {
+    if app.opening.is_some() {
+        return;
+    }
+    let Some(key) = app.selected.clone() else {
+        return;
+    };
+    let now = now_ms();
+    let Some(session) = app
+        .board
+        .rows(now)
+        .into_iter()
+        .find(|s| s.key() == key)
+        .cloned()
+    else {
+        return;
+    };
+    let mark = app.board.acknowledge(&key);
+    keep(app, mark);
+    let target = host::Target {
+        agent_exe: session.agent.exe().to_string(),
+        host: session
+            .host_pid
+            .zip(session.host_exe.clone())
+            .map(|(pid, exe)| host::Host {
+                pid,
+                exe,
+                agent_pid: session.agent_pid,
+            }),
+        pane: session.pane.clone(),
+        cwd: session.cwd.clone(),
+    };
+    let label = format!("{} ({})", session.folder(), session.agent.name());
+    let ended = session.state == State::Ended;
+    app.status = Some((format!("opening {label}…"), false));
+    let (tx, rx) = mpsc::channel();
+    app.opening = Some(rx);
+    std::thread::spawn(move || {
+        let status = match host::focus_session(&target) {
+            Ok(None) => (format!("opened {label}"), false),
+            Ok(Some(tab)) => (format!("opened {label} · {tab}"), false),
+            // An ended session's window is usually closed too: not a fault.
+            Err(_) if ended => (format!("{label} has ended and its window is gone"), false),
+            Err(e) => (e, true),
+        };
+        let _ = tx.send(status);
+    });
+}
+
+/// Stores a mark so a restart remembers it; a failure only costs that.
+fn keep(app: &mut App, mark: Option<Mark>) {
+    if let Some(mark) = mark {
+        if let Err(e) = store::append_line(&store::marks_path(), &mark) {
+            app.status = Some((format!("could not remember that: {e}"), true));
+        }
+    }
+}
+
+fn display_width(text: &str) -> usize {
+    text.chars()
+        .map(|c| UnicodeWidthChar::width(c).unwrap_or(0))
+        .sum()
+}
+
+fn state_cell(session: &Session, tick: usize) -> Span<'static> {
+    match session.state {
+        State::Waiting => Span::styled(
+            "● wait ",
+            Style::new().fg(WAIT_COLOR).add_modifier(Modifier::BOLD),
+        ),
+        State::Done if !session.seen => Span::styled(
+            "✓ done ",
+            Style::new().fg(DONE_COLOR).add_modifier(Modifier::BOLD),
+        ),
+        State::Done => Span::styled("✓ done ", Style::new().add_modifier(Modifier::DIM)),
+        State::Working => Span::raw(format!("{} work ", SPINNER[tick % SPINNER.len()])),
+        State::Idle => Span::styled("  idle ", Style::new().add_modifier(Modifier::DIM)),
+        State::Ended => Span::styled("  ended", Style::new().add_modifier(Modifier::DIM)),
+    }
+}
+
+/// Cuts `text` to at most `width` terminal columns.
+fn clip_width(text: &str, width: usize) -> String {
+    let mut out = String::new();
+    let mut used = 0;
+    for c in text.chars() {
+        let w = UnicodeWidthChar::width(c).unwrap_or(0);
+        if used + w > width {
+            break;
+        }
+        out.push(c);
+        used += w;
+    }
+    out
+}
+
+/// Fits `text` into `width` terminal columns plus one space. Counts display
+/// width, so CJK folder names line up with ASCII ones.
+fn pad(text: &str, width: usize) -> String {
+    let mut out = clip_width(text, width);
+    let used = display_width(&out);
+    out.extend(std::iter::repeat_n(' ', width - used + 1));
+    out
+}
+
+/// The session box title, with a legend for the timeline when it is shown.
+fn sort_label(order: Order) -> &'static str {
+    match order {
+        Order::Fixed => "in order of arrival",
+        Order::Urgency => "by urgency",
+    }
+}
+
+fn sessions_title(timeline: usize, order: Order) -> Line<'static> {
+    let sorted = if order == Order::Urgency {
+        " · by urgency"
+    } else {
+        ""
+    };
+    if timeline == 0 {
+        return Line::raw(format!(" sessions{sorted} "));
+    }
+    let dim = Style::new().add_modifier(Modifier::DIM);
+    Line::from(vec![
+        Span::raw(format!(" sessions{sorted} · last {timeline} min   ")),
+        Span::styled("━", Style::new().fg(agent_color(Agent::Claude))),
+        Span::styled(" working  ", dim),
+        Span::styled(
+            "━",
+            Style::new().fg(WAIT_COLOR).add_modifier(Modifier::BOLD),
+        ),
+        Span::styled(" waiting  ", dim),
+        Span::styled(
+            "✓",
+            Style::new().fg(DONE_COLOR).add_modifier(Modifier::BOLD),
+        ),
+        Span::styled(" finished  ", dim),
+        Span::styled("·", dim),
+        Span::styled(" idle ", dim),
+    ])
+}
+
+fn timeline_spans(session: &Session, now: u64, slots: usize) -> Vec<Span<'static>> {
+    let dim = Style::new().add_modifier(Modifier::DIM);
+    let mut spans: Vec<Span> = session
+        .timeline(now, slots, SLOT_MS)
+        .into_iter()
+        .map(|slot| match slot {
+            Slot::None => Span::raw(" "),
+            Slot::Idle => Span::styled("·", dim),
+            Slot::Working => Span::styled("━", Style::new().fg(agent_color(session.agent))),
+            Slot::Waiting => Span::styled(
+                "━",
+                Style::new().fg(WAIT_COLOR).add_modifier(Modifier::BOLD),
+            ),
+            Slot::Finished => Span::styled(
+                "✓",
+                Style::new().fg(DONE_COLOR).add_modifier(Modifier::BOLD),
+            ),
+        })
+        .collect();
+    spans.push(Span::raw("  "));
+    spans
+}
+
+/// Nerd Fonts glyphs (codicons). Claude's and OpenAI's arrived in Nerd Fonts
+/// 3.5.0 (absent from 3.4.0), Copilot's earlier; an older font shows boxes for
+/// the first two.
+fn agent_icon(agent: Agent) -> char {
+    match agent {
+        Agent::Claude => '\u{ec82}',  // cod-claude
+        Agent::Copilot => '\u{ec1e}', // cod-copilot
+        Agent::Codex => '\u{ec81}',   // cod-openai
+    }
+}
+
+/// An agent's name, padded to its column, with its icon when icons are on.
+fn agent_cell(agent: Agent, icons: bool) -> Span<'static> {
+    let name = pad(agent.name(), AGENT_WIDTH);
+    let text = if icons {
+        format!("{} {name}", agent_icon(agent))
+    } else {
+        name
+    };
+    Span::styled(text, Style::new().fg(agent_color(agent)))
+}
+
+fn session_line(
+    session: &Session,
+    now: u64,
+    tick: usize,
+    timeline: usize,
+    hovered: bool,
+    icons: bool,
+) -> Line<'static> {
+    let link = if hovered {
+        Style::new()
+            .fg(LINK_COLOR)
+            .add_modifier(Modifier::BOLD | Modifier::UNDERLINED)
+    } else {
+        Style::new().add_modifier(Modifier::BOLD | Modifier::UNDERLINED)
+    };
+    let dim = Style::new().add_modifier(Modifier::DIM);
+    let mut spans =
+        vec![
+            state_cell(session, tick),
+            Span::raw(" "),
+            agent_cell(session.agent, icons),
+            Span::styled(
+                pad(&host_short(session.host_exe.as_deref()), APP_WIDTH),
+                Style::new().add_modifier(Modifier::DIM),
+            ),
+            // Underlined: the folder name is the link that opens the window.
+            Span::styled(clip_width(session.folder(), FOLDER_WIDTH), link),
+            Span::raw(" ".repeat(
+                FOLDER_WIDTH - display_width(&clip_width(session.folder(), FOLDER_WIDTH)) + 1,
+            )),
+            Span::styled(format!("{:>4}  ", age(now, session.since)), dim),
+        ];
+    if timeline > 0 {
+        spans.extend(timeline_spans(session, now, timeline));
+    }
+    match (session.state, &session.detail, &session.prompt) {
+        (State::Waiting | State::Done, Some(detail), _) => spans.push(Span::raw(plain(detail))),
+        (_, _, Some(prompt)) => spans.push(Span::styled(format!("> {}", plain(prompt)), dim)),
+        _ => {}
+    }
+    Line::from(spans)
+}
+
+fn header(app: &App, now: u64) -> Line<'static> {
+    let rows = app.board.rows(now);
+    let waiting = rows.iter().filter(|s| s.state == State::Waiting).count();
+    let done = rows
+        .iter()
+        .filter(|s| s.state == State::Done && !s.seen)
+        .count();
+    let working = rows.iter().filter(|s| s.state == State::Working).count();
+
+    let mut spans = vec![Span::styled(
+        " bellpanel ",
+        Style::new().add_modifier(Modifier::BOLD),
+    )];
+    let mut count = |n: usize, label: &str, color: Option<Color>| {
+        let style = match (n, color) {
+            (0, _) => Style::new().add_modifier(Modifier::DIM),
+            (_, Some(c)) => Style::new().fg(c).add_modifier(Modifier::BOLD),
+            (_, None) => Style::new(),
+        };
+        spans.push(Span::styled(format!(" {n} {label} "), style));
+    };
+    count(waiting, "waiting", Some(WAIT_COLOR));
+    count(done, "done", Some(DONE_COLOR));
+    count(working, "working", None);
+    spans.push(Span::raw("   "));
+    // An agent that has never reported usually has untrusted or missing hooks
+    // (DESIGN.md §8), so "never" is shown rather than left out. Agents without
+    // our hooks are not listed at all, unless events from them are on file.
+    for agent in Agent::ALL
+        .into_iter()
+        .filter(|a| app.agents.contains(a) || app.board.last_seen(*a).is_some())
+    {
+        let label = if app.settings.icons {
+            format!("{} {}", agent_icon(agent), agent.name())
+        } else {
+            agent.name().to_string()
+        };
+        spans.push(Span::styled(label, Style::new().fg(agent_color(agent))));
+        match app.board.last_seen(agent) {
+            Some(at) => spans.push(Span::styled(
+                format!(" {}  ", age(now, at)),
+                Style::new().add_modifier(Modifier::DIM),
+            )),
+            None => spans.push(Span::styled(" never  ", Style::new().fg(WAIT_COLOR))),
+        }
+    }
+    Line::from(spans)
+}
+
+fn kind_label(kind: Kind) -> &'static str {
+    match kind {
+        Kind::Start => "start",
+        Kind::Prompt => "prompt",
+        Kind::Waiting => "waiting",
+        Kind::Resumed => "approved",
+        Kind::Stop => "finished",
+        Kind::End => "ended",
+    }
+}
+
+/// The event log's lines and title. By default it follows the selected
+/// session, reading like that session's conversation: what was asked, what
+/// came back. `e` switches to every session's events in one stream.
+fn event_log(app: &App, now: u64, rows: usize) -> (Vec<Line<'static>>, Line<'static>) {
+    let dim = Style::new().add_modifier(Modifier::DIM);
+    // Older records still carry Codex's uninformative end reason "other".
+    let text_of = |e: &bellpanel::event::Event| {
+        e.text
+            .as_deref()
+            .filter(|t| !(e.kind == Kind::End && *t == "other"))
+            .map(plain)
+            .unwrap_or_default()
+    };
+    let selected = app
+        .selected
+        .as_ref()
+        .filter(|_| app.settings.events == EventsMode::Selected);
+    let mut lines: Vec<Line> = match selected {
+        Some(key) => app
+            .board
+            .session_log(key)
+            .rev()
+            .take(rows)
+            .map(|e| {
+                // The person's words stand out; replies and the rest are quieter.
+                let text = match e.kind {
+                    Kind::Prompt => {
+                        Span::styled(text_of(e), Style::new().add_modifier(Modifier::BOLD))
+                    }
+                    Kind::Waiting => Span::styled(text_of(e), Style::new().fg(WAIT_COLOR)),
+                    _ => Span::raw(text_of(e)),
+                };
+                Line::from(vec![
+                    Span::styled(format!("{:>4} ", age(now, e.at)), dim),
+                    Span::styled(pad(kind_label(e.kind), 9), dim),
+                    text,
+                ])
+            })
+            .collect(),
+        None => app
+            .board
+            .log()
+            .rev()
+            .take(rows)
+            .map(|e| {
+                Line::from(vec![
+                    Span::styled(format!("{:>4} ", age(now, e.at)), dim),
+                    agent_cell(e.agent, app.settings.icons),
+                    Span::raw(pad(bellpanel::state::folder_of(&e.cwd), 20)),
+                    Span::raw(pad(kind_label(e.kind), 9)),
+                    Span::styled(text_of(e), dim),
+                ])
+            })
+            .collect(),
+    };
+    lines.reverse();
+    let title = match selected {
+        Some((agent, id)) => {
+            let folder = app
+                .board
+                .rows(now)
+                .into_iter()
+                .find(|s| s.agent == *agent && s.id == *id)
+                .map(|s| s.folder().to_string())
+                .unwrap_or_default();
+            Line::from(vec![
+                Span::raw(" events · "),
+                Span::styled(folder, Style::new().add_modifier(Modifier::BOLD)),
+                Span::raw(" "),
+                Span::styled(agent.name(), Style::new().fg(agent_color(*agent))),
+                Span::styled("  (e: every session, then off) ", dim),
+            ])
+        }
+        None => Line::from(vec![
+            Span::raw(" events · every session "),
+            Span::styled(" (e: off) ", dim),
+        ]),
+    };
+    (lines, title)
+}
+
+/// Heights of the session box and the event log in a terminal `height` rows
+/// tall. Sessions come first and take what they need; the log gets what is
+/// left, and is left out when that is less than one line inside its border.
+fn split_heights(height: u16, sessions: u16) -> (u16, u16) {
+    let room = height.saturating_sub(2); // header and footer
+    let list = (sessions.max(1) + 2).min(room);
+    let log = room - list;
+    if log < 3 {
+        (room, 0)
+    } else {
+        (list, log)
+    }
+}
+
+fn draw(frame: &mut ratatui::Frame, app: &mut App) {
+    let now = now_ms();
+    let area = frame.area();
+    let (list_height, log_height) = if app.settings.events == EventsMode::Off {
+        (area.height.saturating_sub(2), 0)
+    } else {
+        split_heights(area.height, app.board.rows(now).len() as u16)
+    };
+    let [head_area, list_area, log_area, foot_area] = Layout::vertical([
+        Constraint::Length(1),
+        Constraint::Length(list_height),
+        Constraint::Length(log_height),
+        Constraint::Length(1),
+    ])
+    .areas(area);
+    let timeline = timeline_slots(area.width, app.settings.icons);
+
+    frame.render_widget(Paragraph::new(header(app, now)), head_area);
+
+    let rows = app.board.rows_in(now, app.settings.sort);
+    app.visible = rows.iter().map(|s| s.key()).collect();
+    app.visible_folder_widths = rows
+        .iter()
+        .map(|s| display_width(s.folder()).min(FOLDER_WIDTH))
+        .collect();
+    if app
+        .selected
+        .as_ref()
+        .is_none_or(|k| !app.visible.contains(k))
+    {
+        app.selected = app.visible.first().cloned();
+    }
+    let selected_index = app
+        .selected
+        .as_ref()
+        .and_then(|k| app.visible.iter().position(|v| v == k));
+    let items: Vec<ListItem> = rows
+        .iter()
+        .enumerate()
+        .map(|(i, s)| {
+            ListItem::new(session_line(
+                s,
+                now,
+                app.tick,
+                timeline,
+                app.hover == Some(i),
+                app.settings.icons,
+            ))
+        })
+        .collect();
+    let empty = items.is_empty();
+    let list = List::new(items)
+        .block(Block::bordered().title(sessions_title(timeline, app.settings.sort)))
+        // A tinted background, not reversed colours: reversing turns every
+        // coloured timeline cell into a coloured block.
+        .highlight_style(Style::new().bg(SELECTED_BG));
+    let mut state = ListState::default()
+        .with_selected(selected_index)
+        .with_offset(app.list_offset);
+    frame.render_stateful_widget(list, list_area, &mut state);
+    app.list_offset = state.offset();
+    app.rows_area = Block::bordered().inner(list_area);
+    if empty {
+        let hint = Paragraph::new(format!(
+            "No sessions yet. Run `bellpanel install`, restart your agents, and they appear here.\nEvents: {}",
+            app.tail.path().display()
+        ))
+        .style(Style::new().add_modifier(Modifier::DIM));
+        frame.render_widget(hint, app.rows_area);
+    }
+
+    if log_area.height > 0 {
+        let (lines, title) = event_log(app, now, log_area.height.saturating_sub(2) as usize);
+        frame.render_widget(
+            Paragraph::new(lines).block(Block::bordered().title(title)),
+            log_area,
+        );
+    }
+
+    let hovered = app.hover.and_then(|i| rows.get(i));
+    let foot = match (&app.status, hovered) {
+        (Some((text, true)), _) => Line::styled(format!(" {text}"), Style::new().fg(ERROR_COLOR)),
+        (Some((text, false)), _) => Line::raw(format!(" {text}")),
+        (None, Some(s)) => {
+            let target = s
+                .host_exe
+                .as_deref()
+                .map_or("its window".to_string(), host_name);
+            Line::from(vec![
+                Span::raw(" click to open "),
+                Span::styled(
+                    s.folder().to_string(),
+                    Style::new().fg(LINK_COLOR).add_modifier(Modifier::BOLD),
+                ),
+                Span::raw(format!(" in {target}")),
+            ])
+        }
+        (None, None) => Line::styled(format!(" {HELP}"), Style::new().add_modifier(Modifier::DIM)),
+    };
+    frame.render_widget(Paragraph::new(foot), foot_area);
+
+    if app.show_keys {
+        draw_keys(frame, area);
+    }
+}
+
+/// The `?` key list, over the middle of the screen.
+fn draw_keys(frame: &mut ratatui::Frame, area: Rect) {
+    let key_width = KEYS
+        .iter()
+        .map(|(k, _)| display_width(k))
+        .max()
+        .unwrap_or(0);
+    let lines: Vec<Line> = KEYS
+        .iter()
+        .map(|(key, what)| {
+            Line::from(vec![
+                Span::styled(
+                    pad(key, key_width),
+                    Style::new().add_modifier(Modifier::BOLD),
+                ),
+                Span::raw(" "),
+                Span::raw(*what),
+            ])
+        })
+        .collect();
+    let width = (lines.iter().map(|l| l.width()).max().unwrap_or(0) as u16 + 4).min(area.width);
+    let height = (lines.len() as u16 + 2).min(area.height);
+    let popup = Rect {
+        x: area.x + (area.width - width) / 2,
+        y: area.y + (area.height - height) / 2,
+        width,
+        height,
+    };
+    frame.render_widget(ratatui::widgets::Clear, popup);
+    frame.render_widget(
+        Paragraph::new(lines).block(
+            Block::bordered()
+                .title(" keys · any key closes ")
+                .padding(ratatui::widgets::Padding::horizontal(1)),
+        ),
+        popup,
+    );
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn the_timeline_shrinks_with_the_terminal() {
+        assert_eq!(timeline_slots(130, false), TIMELINE_SLOTS);
+        assert_eq!(
+            timeline_slots(80, false),
+            80 - ROW_FIXED_WIDTH - 2 - ROW_TEXT_MIN_WIDTH
+        );
+        assert_eq!(
+            timeline_slots(80, true),
+            80 - ROW_FIXED_WIDTH - ICON_WIDTH - 2 - ROW_TEXT_MIN_WIDTH
+        );
+        assert_eq!(timeline_slots(60, false), 0);
+    }
+
+    #[test]
+    fn sessions_get_their_rows_before_the_log() {
+        // A short pane, like a terminal docked under a note: 3 sessions, 8 rows.
+        assert_eq!(split_heights(8, 3), (6, 0));
+        // Room for both: sessions take 3 + borders, the log the rest.
+        assert_eq!(split_heights(30, 3), (5, 23));
+        // Too little for one log line: sessions keep everything.
+        assert_eq!(split_heights(9, 3), (7, 0));
+        assert_eq!(split_heights(10, 3), (5, 3));
+        // More sessions than fit: the box fills the pane.
+        assert_eq!(split_heights(12, 40), (10, 0));
+    }
+
+    #[test]
+    fn apps_get_short_names() {
+        assert_eq!(host_short(Some("Code")), "code");
+        assert_eq!(host_short(Some("WindowsTerminal")), "wt");
+        assert_eq!(host_short(Some("wezterm-gui")), "wez");
+        assert_eq!(host_short(Some("Obsidian")), "obs");
+        assert_eq!(host_short(Some("alacritty")), "alac");
+        assert_eq!(host_short(None), "-");
+    }
+
+    #[test]
+    fn the_events_key_cycles_through_three_views() {
+        let mut mode = EventsMode::default();
+        let mut seen = vec![mode];
+        for _ in 0..3 {
+            mode = mode.next();
+            seen.push(mode);
+        }
+        assert_eq!(
+            seen,
+            [
+                EventsMode::Selected,
+                EventsMode::All,
+                EventsMode::Off,
+                EventsMode::Selected
+            ]
+        );
+    }
+
+    #[test]
+    fn settings_saved_by_earlier_versions_still_load() {
+        let old: Settings =
+            serde_json::from_str(r#"{"sort":"urgency","all_events":true,"icons":true}"#).unwrap();
+        assert_eq!(
+            (old.sort, old.events, old.icons),
+            (Order::Urgency, EventsMode::Selected, true)
+        );
+    }
+
+    #[test]
+    fn padding_counts_display_width() {
+        assert_eq!(pad("日本", 5), "日本  ");
+        assert_eq!(pad("abcdef", 3), "abc ");
+    }
+}
