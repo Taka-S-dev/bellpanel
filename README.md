@@ -41,10 +41,15 @@ It only watches. Approving tool calls stays with each agent, or with
 ## Set up
 
 ```powershell
-cargo build --release
-target\release\bellpanel install --dry-run   # see what would change
-target\release\bellpanel install
+cargo install --path .
+bellpanel install --dry-run   # see what would change
+bellpanel install
 ```
+
+`cargo install` puts `bellpanel` in `~/.cargo/bin`, which rustup adds to
+`PATH`, so it runs from any terminal. Open a new terminal if the command is
+not found yet. To update after pulling changes, run `cargo install --path .`
+and then `bellpanel install` again, so the hook binary copy is refreshed too.
 
 `install` sets up the agents it finds: those with a `~/.claude`, `~/.copilot`
 or `~/.codex` folder. The others are skipped and nothing is created for them.
@@ -61,7 +66,7 @@ Then:
 1. Restart running agents so they read the new hooks.
 2. **Codex**: open `codex`, run `/hooks` and trust the bellpanel hooks. Codex
    skips untrusted hooks without saying so.
-3. Run `target\release\bellpanel` in the terminal you keep open.
+3. Run `bellpanel` in the terminal you keep open.
 
 The header shows when each agent last reported. An agent stuck on `never`
 after you have used it has hooks that are missing or not trusted.
