@@ -4,6 +4,7 @@
 !/.gitignore
 !/Cargo.toml
 !/Cargo.lock
+!/.cargo/config.toml
 !/README.md
 !/LICENSE
 !/docs/**
