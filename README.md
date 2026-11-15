@@ -40,6 +40,8 @@ It only watches. Approving tool calls stays with each agent, or with
 
 ## Set up
 
+Needs Rust ([rustup](https://rustup.rs/)) with the MSVC build tools.
+
 ```powershell
 cargo install --path .
 bellpanel install --dry-run   # see what would change
@@ -50,6 +52,11 @@ bellpanel install
 `PATH`, so it runs from any terminal. Open a new terminal if the command is
 not found yet. To update after pulling changes, run `cargo install --path .`
 and then `bellpanel install` again, so the hook binary copy is refreshed too.
+
+`cargo build --release` builds the same two binaries into `target\release\`
+without installing them. To run on a machine without Rust, copy both
+`bellpanel.exe` and `bellpanel-hook.exe` into one folder on its `PATH` and
+run `bellpanel install` there.
 
 `install` sets up the agents it finds: those with a `~/.claude`, `~/.copilot`
 or `~/.codex` folder. The others are skipped and nothing is created for them.
