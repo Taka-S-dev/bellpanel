@@ -238,7 +238,8 @@ arriving later does not make it unseen again, only a new finish does.
 ## 7. Bell
 
 The TUI writes BEL when a session moves into *waiting* or *done* while it is
-tailing, never while replaying the file at start-up. terminal-pane turns that
+tailing, never while replaying the file at start-up. `m` narrows that to
+waits only, or turns it off; the choice is kept in `settings.json`. terminal-pane turns that
 into a blinking dot on the tab and a flashing taskbar button, but only when the
 dashboard's terminal does not have the keyboard, which is the case it is for.
 

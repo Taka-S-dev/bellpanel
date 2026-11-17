@@ -326,6 +326,44 @@ impl EventsMode {
     }
 }
 
+/// What the terminal bell rings for.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "lowercase")]
+enum Bell {
+    /// A session starting to wait, and one finishing.
+    #[default]
+    Both,
+    /// Only a session starting to wait: the one that is stuck without you.
+    Waits,
+    Off,
+}
+
+impl Bell {
+    fn next(self) -> Bell {
+        match self {
+            Bell::Both => Bell::Waits,
+            Bell::Waits => Bell::Off,
+            Bell::Off => Bell::Both,
+        }
+    }
+
+    fn label(self) -> &'static str {
+        match self {
+            Bell::Both => "bell: waits and finishes",
+            Bell::Waits => "bell: waits only",
+            Bell::Off => "bell: off",
+        }
+    }
+
+    fn rings(self, kind: Kind) -> bool {
+        match self {
+            Bell::Both => true,
+            Bell::Waits => kind == Kind::Waiting,
+            Bell::Off => false,
+        }
+    }
+}
+
 /// Preferences kept in `settings.json`. Unknown or missing fields fall back
 /// to their defaults, so an old or hand-edited file still loads.
 #[derive(Default, serde::Serialize, serde::Deserialize)]
@@ -337,6 +375,7 @@ struct Settings {
     /// cannot tell which font the terminal draws with, and without the
     /// glyphs every icon is an empty box.
     icons: bool,
+    bell: Bell,
 }
 
 impl Settings {
@@ -491,7 +530,7 @@ fn event_loop(terminal: &mut ratatui::DefaultTerminal, app: &mut App) -> io::Res
         match app.tail.read_new() {
             Ok(events) => {
                 for event in events {
-                    ring |= app.board.apply(&event);
+                    ring |= app.board.apply(&event) && app.settings.bell.rings(event.kind);
                 }
             }
             Err(e) => {
@@ -542,6 +581,10 @@ fn event_loop(terminal: &mut ratatui::DefaultTerminal, app: &mut App) -> io::Res
                     KeyCode::Char('q') | KeyCode::Esc => return Ok(()),
                     KeyCode::Char('j') | KeyCode::Down => move_selection(app, 1),
                     KeyCode::Char('k') | KeyCode::Up => move_selection(app, -1),
+                    KeyCode::Char('m') => {
+                        app.settings.bell = app.settings.bell.next();
+                        save_settings(app, app.settings.bell.label().to_string());
+                    }
                     KeyCode::Enter => open_selected(app),
                     KeyCode::Char(' ') => {
                         if let Some(key) = app.selected.clone() {
@@ -668,6 +711,14 @@ fn host_short(exe: Option<&str>) -> String {
         "cursor" => "cur".into(),
         other => other.chars().take(APP_WIDTH).collect(),
     }
+}
+
+/// Saves the settings and says what changed, or that it could not be kept.
+fn save_settings(app: &mut App, shown: String) {
+    app.status = Some(match app.settings.save() {
+        Ok(()) => (shown, false),
+        Err(e) => (format!("{shown}, but could not save it: {e}"), true),
+    });
 }
 
 fn move_selection(app: &mut App, step: isize) {
@@ -1456,6 +1507,14 @@ fn draw_keys(frame: &mut ratatui::Frame, area: Rect) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_bell_rings_for_what_it_is_set_to() {
+        assert!(Bell::Both.rings(Kind::Stop) && Bell::Both.rings(Kind::Waiting));
+        assert!(Bell::Waits.rings(Kind::Waiting) && !Bell::Waits.rings(Kind::Stop));
+        assert!(!Bell::Off.rings(Kind::Waiting));
+        assert_eq!(Bell::Both.next().next().next(), Bell::Both);
+    }
 
     #[test]
     fn the_timeline_shrinks_with_the_terminal() {
