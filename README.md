@@ -9,7 +9,7 @@ and someone went to that room. Here the rooms are agent sessions, the bell is
 the terminal bell, and going to the room is one click.
 
 ```
- bellpanel  1 waiting  1 done  1 working    claude 0s  copilot 1s  codex 0s
+ 1 waiting  1 done  1 working    claude 0s  copilot 1s  codex 0s
 ┌ sessions · last 20 min   ━ working  ━ waiting  ✓ finished  · idle ────────────┐
 │● wait  codex   wt   infra                 2m  ······━━━━━━━━━━━━━━  shell      │
 │✓ done  claude  code 日本語プロジェクト    0s  ··━━━✓····━━━━━━━━━✓  テストを書 │

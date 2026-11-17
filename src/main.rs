@@ -856,10 +856,7 @@ fn header(app: &App, now: u64) -> Line<'static> {
         .count();
     let working = rows.iter().filter(|s| s.state == State::Working).count();
 
-    let mut spans = vec![Span::styled(
-        " bellpanel ",
-        Style::new().add_modifier(Modifier::BOLD),
-    )];
+    let mut spans = Vec::new();
     let mut count = |n: usize, label: &str, color: Option<Color>| {
         let style = match (n, color) {
             (0, _) => Style::new().add_modifier(Modifier::DIM),
