@@ -97,7 +97,6 @@ while Obsidian is in front.
 
 ## Not yet measured
 
-- Copilot double-firing Claude's project hooks in a trusted folder.
 - Claude Code's and Codex's waiting events in real use. Copilot's were seen
   later: a `notification` of type `elicitation_dialog`, then `postToolUse`.
 
@@ -128,6 +127,35 @@ name.
   `bellpanel which-host codex %USERPROFILE%` -> `WindowsTerminal`.
 - The click does the same lookup for sessions recorded without a host, so
   earlier rows open too while their agent is still running.
+
+## Nothing reports an approved command starting (2026-11-17)
+
+Measured with every tool event logged (`spike/sandbox`) and new shell
+processes sampled every 200 ms, asking each agent to run
+`Start-Sleep 15; echo done`.
+
+- Copilot CLI 1.0.112: `preToolUse` (powershell), then `permissionRequest`,
+  then `notification` of type `permission_prompt`, all within 2 s and
+  **before** the prompt is answered. Approving sends nothing. The command's
+  `pwsh` starts as a child of `copilot.exe` the moment it is approved, and
+  `postToolUse` arrives only when it ends, 15 s later. A session waits on
+  screen for as long as the command runs.
+- In a trusted folder Copilot also ran Claude's project hooks from
+  `.claude/settings.local.json`, about 0.4 s after its own.
+- Claude Code 2.1.325 and Codex 0.169.0 did not ask: the command was allowed
+  without a prompt, so their approval was not seen. Where their commands run
+  was:
+  - Claude Code: `pwsh` as a child of `claude.exe`, the process the hook
+    records as `agent_pid`.
+  - Codex: `powershell` under `codex-command-runner-0.169.0.exe` under the
+    parentless `codex.exe` app-server, not under the TUI recorded as
+    `agent_pid`. The app-server is shared by every Codex session.
+- Hooks also run as children of the agent (`pwsh -nop -nol -c ...` for
+  Copilot, Git Bash for Claude). Only their start was sampled here; their
+  length was timed the next day (2026-11-18) by running bellpanel's hook
+  with the same command lines by hand, 5 runs each: 260 to 300 ms through
+  `pwsh -nop -nol -c`, about 80 ms through Git Bash. Other tools' hooks can
+  take longer.
 
 ## Nerd Font icons on Windows (2026-11-15)
 

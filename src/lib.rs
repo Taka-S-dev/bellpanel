@@ -6,3 +6,4 @@ pub mod install;
 pub mod state;
 pub mod store;
 pub mod tabs;
+pub mod watch;

@@ -7,6 +7,7 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use bellpanel::event::{plain, Agent, Kind};
 use bellpanel::state::{Board, Key, Mark, Order, Session, Slot, State};
 use bellpanel::store::{self, Tail};
+use bellpanel::watch::{CommandWatch, Waiter};
 use bellpanel::{host, install};
 use ratatui::crossterm::event::{
     self, DisableMouseCapture, EnableMouseCapture, Event as TermEvent, KeyCode, KeyEventKind,
@@ -359,6 +360,10 @@ struct App {
     hover: Option<usize>,
     /// A window being brought forward on another thread; its status line.
     opening: Option<mpsc::Receiver<(String, bool)>>,
+    /// The bell has rung and the request has not been withdrawn yet.
+    attention_asked: bool,
+    /// New processes while a session waits, to see an approved command start.
+    commands: CommandWatch,
     tick: usize,
 }
 
@@ -378,6 +383,8 @@ fn run_dashboard() -> io::Result<()> {
         opening: None,
         status_seen: None,
         show_keys: false,
+        attention_asked: false,
+        commands: CommandWatch::default(),
         tick: 0,
     };
     // Replay what is already there without ringing for it, then what the
@@ -395,6 +402,50 @@ fn run_dashboard() -> io::Result<()> {
     let _ = execute!(io::stdout(), DisableMouseCapture);
     ratatui::restore();
     result
+}
+
+/// Writes bytes straight to the terminal, past ratatui's buffer.
+fn write_raw(bytes: &[u8]) {
+    let mut out = io::stdout();
+    let _ = out.write_all(bytes);
+    let _ = out.flush();
+}
+
+/// Ends the wait of sessions whose approved command has started: no hook
+/// reports that until the command finishes (watch.rs).
+fn watch_commands(app: &mut App) {
+    let waiting: Vec<&Session> = app.board.waiting().collect();
+    if waiting.is_empty() {
+        app.commands.stop();
+        return;
+    }
+    let waiters: Vec<Waiter> = waiting
+        .iter()
+        .map(|s| Waiter {
+            key: s.key(),
+            agent_exe: s.agent.exe(),
+            agent_pid: s.agent_pid,
+            cwd: &s.cwd,
+            since: s.since,
+            alone: app.board.busy(s.agent) == 1,
+        })
+        .collect();
+    let now = now_ms();
+    let started = app
+        .commands
+        .poll(now, &host::processes(), &waiters, host::process_cwd);
+    for key in started {
+        app.board.command_started(&key, now);
+    }
+}
+
+/// Whether any listed session still waits for the user. Unseen finishes do
+/// not hold the mark: a wait answered in the agent's window should clear it.
+fn waits_for_user(app: &App) -> bool {
+    app.board
+        .rows(now_ms())
+        .iter()
+        .any(|s| s.state == State::Waiting)
 }
 
 fn event_loop(terminal: &mut ratatui::DefaultTerminal, app: &mut App) -> io::Result<()> {
@@ -423,13 +474,24 @@ fn event_loop(terminal: &mut ratatui::DefaultTerminal, app: &mut App) -> io::Res
                 ))
             }
         }
+        // Once a second: listing processes is too costly for every tick.
+        if app.tick.is_multiple_of(4) {
+            watch_commands(app);
+        }
         fade_status(app);
         terminal.draw(|frame| draw(frame, app))?;
         if ring {
             // terminal-pane turns BEL into a tab mark and a taskbar flash.
-            let mut out = io::stdout();
-            let _ = out.write_all(b"\x07");
-            let _ = out.flush();
+            write_raw(b"\x07");
+            // A bell for a finish alone is never withdrawn: it stays until
+            // the user looks.
+            app.attention_asked = waits_for_user(app);
+        } else if app.attention_asked && !waits_for_user(app) {
+            // Answered in the agent's own window, or dismissed here: withdraw
+            // the request so the tab mark goes too. iTerm2's sequence;
+            // terminals that do not know it ignore it.
+            write_raw(b"\x1b]1337;RequestAttention=no\x07");
+            app.attention_asked = false;
         }
         app.tick = app.tick.wrapping_add(1);
 

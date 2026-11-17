@@ -178,6 +178,31 @@ windows.
 Duplicate lines (same session, kind and turn within 2 s) are dropped: a hook
 defined at both user and project level runs twice under Codex.
 
+### An approved command
+
+No agent sends a hook between the user approving a tool call and the command
+running; the next is `PostToolUse`, when it ends (`spike/FINDINGS.md`). Left at
+that, a session would show *waiting* for as long as the approved command runs.
+So while any session waits, the TUI lists processes once a second
+(`watch.rs`) and treats a new one as the wait being answered when it:
+
+- appeared after polling began and at least 1.5 s after the wait began (the
+  hooks reporting the wait run right then), and has run for 2 s (bellpanel's
+  own hook takes under 0.3 s; another tool's hook running longer than 2 s
+  during a wait would be taken for the command);
+- is not itself the agent's executable (that is a new session);
+- has the session's `agent_pid` among its ancestors (Claude Code, Copilot
+  CLI), or else has a process of the same agent among them and runs in the
+  session's folder, read from its PEB (Codex, whose commands run under its
+  shared app-server). When that folder cannot be read, as a sandboxed
+  command may not allow, it counts only if no other session of that agent is
+  waiting or working.
+
+The session then shows *working*, and its log shows the wait as approved.
+This is kept in memory only: after a restart a session still running its
+command shows *waiting* until `PostToolUse` arrives. Two sessions of one agent
+in one folder cannot be told apart, as in §5.
+
 ### Event log
 
 The log under the sessions follows the selected row: that session's last 50
@@ -197,6 +222,16 @@ The TUI writes BEL when a session moves into *waiting* or *done* while it is
 tailing, never while replaying the file at start-up. terminal-pane turns that
 into a blinking dot on the tab and a flashing taskbar button, but only when the
 dashboard's terminal does not have the keyboard, which is the case it is for.
+
+Once no listed session is waiting, the TUI withdraws the request with
+iTerm2's `OSC 1337;RequestAttention=no`, sent once per bell that a wait rang.
+A wait answered in the agent's own window, or a row dismissed here, then
+clears the tab mark without a visit to the dashboard. Unseen finishes do not
+hold it back, since the point is that answering clears the mark; a bell for a
+finish alone is never withdrawn. terminal-pane clears its mark
+and stops the taskbar flash on it; terminals that do not know the sequence
+ignore it. An answered wait is known once the approved command has run for
+about two seconds (§6, An approved command).
 
 ## 8. Silent failures to surface
 

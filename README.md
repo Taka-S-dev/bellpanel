@@ -30,7 +30,10 @@ The column after the agent is the app the session runs in: `code` (VS Code),
   every session's events in one stream, then hides it.
 - The terminal bell rings when a session finishes or starts waiting. A
   terminal that turns the bell into a tab mark (terminal-pane in Obsidian
-  does) shows which pane wants you.
+  does) shows which pane wants you. Once no session waits for you, Bellpanel
+  takes the mark back (`OSC 1337;RequestAttention=no`), so approving in the
+  agent's own window clears it too, about two seconds after the approved
+  command starts.
 - Click a session's folder name (underlined, or press Enter) to bring its
   VS Code or terminal window to the front. Clicking elsewhere on a row only
   selects it, so clicking into the pane never switches windows.

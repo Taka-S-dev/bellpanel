@@ -34,6 +34,13 @@ fn is_host_candidate(exe: &str) -> bool {
     !NOT_HOSTS.contains(&exe.to_lowercase().as_str())
 }
 
+/// Whether two Windows paths name the same folder, ignoring case, slash
+/// direction and a trailing separator.
+pub fn same_dir(a: &str, b: &str) -> bool {
+    let norm = |p: &str| p.replace('/', "\\").trim_end_matches('\\').to_lowercase();
+    norm(a) == norm(b)
+}
+
 #[cfg(windows)]
 mod platform {
     use std::collections::{HashMap, HashSet};
@@ -77,7 +84,7 @@ mod platform {
     }
 
     /// pid -> (parent pid, executable stem) for every running process.
-    fn processes() -> HashMap<u32, (u32, String)> {
+    pub fn processes() -> HashMap<u32, (u32, String)> {
         let mut map = HashMap::new();
         unsafe {
             let Ok(snapshot) = CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0) else {
@@ -201,10 +208,7 @@ mod platform {
         chain_from(parent, &procs, &window_owners())
     }
 
-    fn same_dir(a: &str, b: &str) -> bool {
-        let norm = |p: &str| p.replace('/', "\\").trim_end_matches('\\').to_lowercase();
-        norm(a) == norm(b)
-    }
+    use super::same_dir;
 
     /// The window-owning process a session runs under.
     ///
@@ -296,7 +300,7 @@ mod platform {
     /// The current directory of another process of this user, read from its
     /// PEB (64-bit layout: `ProcessParameters` at 0x20, and in it
     /// `CurrentDirectory.DosPath` at 0x38). Windows offers no direct call.
-    fn process_cwd(pid: u32) -> Option<String> {
+    pub fn process_cwd(pid: u32) -> Option<String> {
         const PARAMETERS: usize = 0x20;
         const CURRENT_DIRECTORY: usize = 0x38;
         unsafe {
@@ -413,6 +417,12 @@ mod platform {
     pub fn ancestry() -> Vec<Ancestor> {
         Vec::new()
     }
+    pub fn processes() -> std::collections::HashMap<u32, (u32, String)> {
+        std::collections::HashMap::new()
+    }
+    pub fn process_cwd(_pid: u32) -> Option<String> {
+        None
+    }
     pub fn host_process(_agent_exe: &str, _cwd: &str) -> Option<super::Host> {
         None
     }
@@ -430,7 +440,10 @@ mod platform {
     }
 }
 
-pub use platform::{agent_host, ancestry, exe_path, focus, host_process, pick_window, Ancestor};
+pub use platform::{
+    agent_host, ancestry, exe_path, focus, host_process, pick_window, process_cwd, processes,
+    Ancestor,
+};
 
 /// What the dashboard knows about where a session runs. Owned, so it can be
 /// handed to the thread that does the (slow) focusing.

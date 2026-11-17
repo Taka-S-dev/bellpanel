@@ -351,6 +351,67 @@ impl Board {
         alert
     }
 
+    /// Sessions waiting on the user that have not ended.
+    pub fn waiting(&self) -> impl Iterator<Item = &Session> {
+        self.sessions
+            .values()
+            .filter(|s| s.state == State::Waiting && s.ended_at.is_none())
+    }
+
+    /// How many sessions of `agent` are waiting or working.
+    pub fn busy(&self, agent: Agent) -> usize {
+        self.sessions
+            .values()
+            .filter(|s| {
+                s.agent == agent
+                    && s.ended_at.is_none()
+                    && matches!(s.state, State::Waiting | State::Working)
+            })
+            .count()
+    }
+
+    /// A waiting session's approved command has started (watch.rs). It is
+    /// working again, as `PostToolUse` would make it once the command ends,
+    /// and the log shows the wait as answered. Nothing is written to the
+    /// event file: the hooks remain its only source.
+    pub fn command_started(&mut self, key: &Key, at: u64) {
+        let Some(s) = self.sessions.get_mut(key) else {
+            return;
+        };
+        if s.state != State::Waiting {
+            return;
+        }
+        s.state = State::Working;
+        s.since = at;
+        s.history.push((at, State::Working));
+        if s.history.len() > HISTORY_LEN {
+            s.history.remove(0);
+        }
+        let event = Event {
+            v: crate::event::FORMAT_VERSION,
+            at,
+            agent: s.agent,
+            kind: Kind::Resumed,
+            event: "command started".to_string(),
+            session: s.id.clone(),
+            turn: None,
+            cwd: s.cwd.clone(),
+            host_pid: None,
+            host_exe: None,
+            agent_pid: None,
+            pane: None,
+            text: None,
+        };
+        s.log.push_back(event.clone());
+        if s.log.len() > SESSION_LOG_LINES {
+            s.log.pop_front();
+        }
+        self.log.push_back(event);
+        if self.log.len() > LOG_LINES {
+            self.log.pop_front();
+        }
+    }
+
     /// Rows to show, most urgent first.
     pub fn rows(&self, now: u64) -> Vec<&Session> {
         self.rows_in(now, Order::Urgency)
@@ -504,6 +565,26 @@ mod tests {
         assert_eq!(b.attention_count(20_000), 1);
         b.acknowledge(&(Agent::Claude, "a".into()));
         assert_eq!(b.attention_count(20_000), 0);
+    }
+
+    #[test]
+    fn an_approved_command_starting_ends_the_wait_once() {
+        let mut b = Board::default();
+        let key = (Agent::Copilot, "a".to_string());
+        b.apply(&ev(Agent::Copilot, "a", Kind::Prompt, 1_000));
+        b.apply(&ev(Agent::Copilot, "a", Kind::Waiting, 2_000));
+        assert_eq!(b.waiting().count(), 1);
+        assert_eq!(b.busy(Agent::Copilot), 1);
+        b.command_started(&key, 9_000);
+        assert_eq!(states(&b, 9_000), [("a".into(), State::Working)]);
+        assert_eq!(b.waiting().count(), 0);
+        // The tool finishing later neither alerts nor logs a second answer.
+        assert!(!b.apply(&ev(Agent::Copilot, "a", Kind::Resumed, 24_000)));
+        let kinds: Vec<Kind> = b.session_log(&key).map(|e| e.kind).collect();
+        assert_eq!(kinds, [Kind::Prompt, Kind::Waiting, Kind::Resumed]);
+        // Only a waiting session is changed.
+        b.command_started(&key, 25_000);
+        assert_eq!(b.session_log(&key).count(), 3);
     }
 
     #[test]
