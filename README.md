@@ -100,15 +100,25 @@ after you have used it has hooks that are missing or not trusted.
 | click elsewhere on a row | select it |
 | point at a folder name | it lights up, and the footer says which window a click opens |
 | `Space` | mark a finished session as seen |
-| `d` | hide the row until the session does something new |
+| `A` | mark every finished session as seen |
+| `d` | hide the row until the session does something new; on a hidden row, bring it back |
+| `a` | list hidden rows too, dim: the ones you hid, and the ones quiet for 30 minutes |
 | `e` | event log: the selected session's conversation → each session's latest event, wrapped → every session's events → hidden |
 | `s` | switch between arrival order and urgency order |
+| `m` | bell: for waits and finishes → for waits only → off |
+| `w` | leave out sessions with no window (agents run by a script or another program), or list them again |
 | `i` | show Nerd Font icons before agent names (needs Nerd Fonts 3.5 or later for Claude's and OpenAI's) |
-| `j` / `k`, wheel | move |
+| `j` / `k`, arrows, wheel | move |
+| `Tab` / `Shift+Tab` | go to the next / previous session that waits or has an unseen finish |
+| `g` / `G` | first / last row |
 | `?` | list these keys |
 | `q`, `Ctrl+C` | quit |
 
-Seen and hidden rows stay that way after a restart (`marks.jsonl`).
+Seen and hidden rows stay that way after a restart (`marks.jsonl`), and so
+do the choices made with `e`, `s`, `m`, `w` and `i` (`settings.json`).
+
+The time on a row is how long the session has been in its state; the time
+beside an event in the log is how long ago it happened.
 
 ## Icons
 

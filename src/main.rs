@@ -55,16 +55,28 @@ fn timeline_slots(width: u16, icons: bool) -> usize {
 /// The footer when nothing else is shown: short enough for a narrow pane.
 const HELP: &str = "click a folder to open · ? keys · q quit";
 /// The full list, shown by `?`.
-const KEYS: [(&str, &str); 10] = [
+const KEYS: [(&str, &str); 16] = [
     (
         "click folder, Enter",
         "bring that session's window and tab forward",
     ),
-    ("click row, j / k", "select"),
+    ("click row, j / k, arrows", "select"),
+    ("Tab, Shift+Tab", "next, previous session that wants you"),
+    ("g, G", "first, last row"),
     ("Space", "mark a finished session as seen"),
-    ("d", "hide the row until the session does something new"),
-    ("e", "event log: selected session, every session, hidden"),
+    ("A", "mark every finished session as seen"),
+    (
+        "d",
+        "hide the row until the session does something new; bring a hidden one back",
+    ),
+    ("a", "list hidden rows too"),
+    (
+        "e",
+        "event log: selected session, each session's latest, every session, hidden",
+    ),
     ("s", "order: as they appeared, or by urgency"),
+    ("m", "bell: waits and finishes, waits only, off"),
+    ("w", "sessions with no window: listed, or left out"),
     ("i", "Nerd Font icons on or off"),
     ("wheel", "move the selection"),
     ("?", "this list"),
