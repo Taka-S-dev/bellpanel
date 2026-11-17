@@ -162,7 +162,9 @@ Per session, the latest `kind` decides the state:
 
 A session with no window (an agent run by a script, `claude -p`) is hidden a
 minute after it ends even when its finish was not seen: nobody is waiting for
-it. A session with no event for 12 hours is hidden.
+it. A session with no event for 12 hours is hidden. One with nothing for the
+user, idle or finished and seen, is hidden 30 minutes after its last event and
+comes back with its next one.
 
 Rows are listed in the order sessions appeared, so none moves while the
 pointer is on its way to it; waiting and unseen finishes stand out by colour

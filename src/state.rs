@@ -10,6 +10,9 @@ const DUPLICATE_WINDOW_MS: u64 = 2_000;
 /// How long an ended session stays, so it can be seen to have ended.
 const ENDED_VISIBLE_MS: u64 = 60 * 1000;
 const STALE_MS: u64 = 12 * 60 * 60 * 1000;
+/// How long a session with nothing for the user (idle, or finished and seen)
+/// stays listed after its last event. It comes back with its next one.
+const QUIET_VISIBLE_MS: u64 = 30 * 60 * 1000;
 const LOG_LINES: usize = 200;
 const HISTORY_LEN: usize = 256;
 /// Events kept per session, for the event log when it follows a selection.
@@ -428,6 +431,10 @@ impl Board {
             .values()
             .filter(|s| now.saturating_sub(s.last_at) < STALE_MS)
             .filter(|s| {
+                let quiet = s.state == State::Idle || (s.state == State::Done && s.seen);
+                !quiet || now.saturating_sub(s.last_at) < QUIET_VISIBLE_MS
+            })
+            .filter(|s| {
                 s.ended_at.is_none_or(|at| {
                     s.wants_attention() || now.saturating_sub(at) < ENDED_VISIBLE_MS
                 })
@@ -570,6 +577,29 @@ mod tests {
         assert_eq!(b.attention_count(20_000), 1);
         b.acknowledge(&(Agent::Claude, "a".into()));
         assert_eq!(b.attention_count(20_000), 0);
+    }
+
+    #[test]
+    fn quiet_rows_leave_the_list_and_come_back_with_new_activity() {
+        let mut b = Board::default();
+        b.apply(&ev(Agent::Claude, "idle", Kind::Start, 0));
+        b.apply(&ev(Agent::Claude, "seen", Kind::Stop, 0));
+        b.acknowledge(&(Agent::Claude, "seen".into()));
+        b.apply(&ev(Agent::Claude, "unseen", Kind::Stop, 0));
+        assert_eq!(states(&b, QUIET_VISIBLE_MS - 1).len(), 3);
+        // Idle and seen rows go; a finish nobody has looked at stays.
+        let left: Vec<String> = states(&b, QUIET_VISIBLE_MS)
+            .into_iter()
+            .map(|(id, _)| id)
+            .collect();
+        assert_eq!(left, ["unseen"]);
+        b.apply(&ev(
+            Agent::Claude,
+            "idle",
+            Kind::Prompt,
+            QUIET_VISIBLE_MS + 1,
+        ));
+        assert_eq!(states(&b, QUIET_VISIBLE_MS + 1).len(), 2);
     }
 
     #[test]
