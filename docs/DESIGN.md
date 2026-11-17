@@ -167,7 +167,10 @@ it. A session with no event for 12 hours is hidden.
 Rows are listed in the order sessions appeared, so none moves while the
 pointer is on its way to it; waiting and unseen finishes stand out by colour
 and in the header counts. `s` switches to urgency order (the table's order
-above), and the choice is kept in `settings.json`.
+above), and the choice is kept in `settings.json`. So that the newest finish
+can be found without the rows moving, the newest unseen finish, however old,
+and any unseen finish under five minutes old show their age in bold green;
+other ages are dim.
 
 "Seen" means the row was opened or acknowledged with a key. Seen and hidden
 rows are written to `marks.jsonl` and re-applied after the events are

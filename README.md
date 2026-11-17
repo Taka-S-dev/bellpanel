@@ -22,7 +22,9 @@ The column after the agent is the app the session runs in: `code` (VS Code),
 
 - Sessions keep their place, in the order they appeared, so a row never moves
   as you reach for it. Press `s` to sort by urgency instead (waiting first,
-  then unseen finishes); the choice is remembered.
+  then unseen finishes, newest first); the choice is remembered. In either
+  order, the newest unseen finish, and any under five minutes old, has its
+  age in bright green, so you can tell which to look at next.
 - Each row has a timeline of the last half hour, one column per minute:
   `━` working, yellow `━` waiting for you, `✓` finished, `·` idle.
 - The event log below follows the selected row and reads like that session's

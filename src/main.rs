@@ -889,9 +889,35 @@ fn agent_cell(agent: Agent, icons: bool) -> Span<'static> {
     Span::styled(text, Style::new().fg(agent_color(agent)))
 }
 
+/// How long a finish counts as just now: its age stands out until then.
+const FRESH_MS: u64 = 5 * 60 * 1000;
+
+/// When the newest finish not yet seen happened, if there is one.
+fn newest_unseen_finish(rows: &[&Session]) -> Option<u64> {
+    rows.iter()
+        .filter(|s| s.state == State::Done && !s.seen)
+        .map(|s| s.since)
+        .max()
+}
+
+/// The age column is dim, except for a finish not yet seen that is the
+/// newest one or under `FRESH_MS` old: the eye finds what to look at next
+/// without the rows moving, however long ago that was.
+fn age_style(session: &Session, now: u64, newest: Option<u64>) -> Style {
+    let fresh = session.state == State::Done
+        && !session.seen
+        && (newest == Some(session.since) || now.saturating_sub(session.since) < FRESH_MS);
+    if fresh {
+        Style::new().fg(DONE_COLOR).add_modifier(Modifier::BOLD)
+    } else {
+        Style::new().add_modifier(Modifier::DIM)
+    }
+}
+
 fn session_line(
     session: &Session,
     now: u64,
+    newest: Option<u64>,
     frame: usize,
     timeline: usize,
     hovered: bool,
@@ -919,7 +945,10 @@ fn session_line(
             Span::raw(" ".repeat(
                 FOLDER_WIDTH - display_width(&clip_width(session.folder(), FOLDER_WIDTH)) + 1,
             )),
-            Span::styled(format!("{:>4}  ", age(now, session.since)), dim),
+            Span::styled(
+                format!("{:>4}  ", age(now, session.since)),
+                age_style(session, now, newest),
+            ),
         ];
     if timeline > 0 {
         spans.extend(timeline_spans(session, now, timeline));
@@ -1287,6 +1316,7 @@ fn draw(frame: &mut ratatui::Frame, app: &mut App) {
         .selected
         .as_ref()
         .and_then(|k| app.visible.iter().position(|v| v == k));
+    let newest = newest_unseen_finish(&rows);
     let items: Vec<ListItem> = rows
         .iter()
         .enumerate()
@@ -1294,6 +1324,7 @@ fn draw(frame: &mut ratatui::Frame, app: &mut App) {
             ListItem::new(session_line(
                 s,
                 now,
+                newest,
                 (app.started.elapsed().as_millis() / SPINNER_FRAME.as_millis()) as usize,
                 timeline,
                 app.hover == Some(i),
@@ -1494,6 +1525,46 @@ mod tests {
         assert_eq!(share_rows(&[9, 9, 2], 10), [4, 4, 2]);
         // Too little room: one line each.
         assert_eq!(share_rows(&[5, 5, 5], 3), [1, 1, 1]);
+    }
+
+    #[test]
+    fn the_newest_or_a_fresh_unseen_finish_has_its_age_stand_out() {
+        let finish = |session: &str, at: u64| bellpanel::event::Event {
+            v: 1,
+            at,
+            agent: Agent::Claude,
+            kind: Kind::Stop,
+            event: "Stop".into(),
+            session: session.into(),
+            turn: None,
+            cwd: format!("C:/work/{session}"),
+            host_pid: None,
+            host_exe: None,
+            agent_pid: None,
+            pane: None,
+            text: None,
+            automatic: false,
+        };
+        let now = 60 * 60 * 1000;
+        let mut board = Board::default();
+        board.apply(&finish("fresh", now - 60_000));
+        board.apply(&finish("old", now - FRESH_MS - 1));
+        board.apply(&finish("seen", now - 60_000));
+        board.acknowledge(&(Agent::Claude, "seen".into()));
+        let bold = |board: &Board, id: &str| {
+            let rows = board.rows(now);
+            let newest = newest_unseen_finish(&rows);
+            let s = rows.iter().find(|s| s.id == id).unwrap();
+            age_style(s, now, newest)
+                .add_modifier
+                .contains(Modifier::BOLD)
+        };
+        assert!(bold(&board, "fresh"));
+        assert!(!bold(&board, "old"));
+        assert!(!bold(&board, "seen"));
+        // Once the fresh one is seen, the newest left stands out however old.
+        board.acknowledge(&(Agent::Claude, "fresh".into()));
+        assert!(bold(&board, "old"));
     }
 
     #[test]
