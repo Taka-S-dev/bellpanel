@@ -6,6 +6,10 @@ use serde_json::Value;
 
 pub const FORMAT_VERSION: u32 = 1;
 const TEXT_LIMIT: usize = 200;
+/// A finished turn's reply is kept longer: it is what the event log shows of
+/// each session, and it has the room to show it. Still well under 4 KiB as
+/// a line, so one write appends it whole (DESIGN.md §2).
+const REPLY_LIMIT: usize = 600;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
@@ -79,13 +83,13 @@ fn str_field<'a>(payload: &'a Value, keys: &[&str]) -> Option<&'a str> {
         .filter(|s| !s.is_empty())
 }
 
-/// Cuts to `TEXT_LIMIT` characters on one line, so a row never wraps.
-pub fn clip(text: &str) -> String {
+/// Cuts to `limit` characters on one line.
+pub fn clip(text: &str, limit: usize) -> String {
     let flat: String = text.split_whitespace().collect::<Vec<_>>().join(" ");
-    if flat.chars().count() <= TEXT_LIMIT {
+    if flat.chars().count() <= limit {
         return flat;
     }
-    let mut cut: String = flat.chars().take(TEXT_LIMIT - 1).collect();
+    let mut cut: String = flat.chars().take(limit - 1).collect();
     cut.push('…');
     cut
 }
@@ -228,7 +232,16 @@ pub fn normalize(agent: Agent, event: &str, payload: &Value, now_ms: u64) -> Opt
             .map(str::to_string),
         Kind::Resumed => None,
     }
-    .map(|t| clip(&t))
+    .map(|t| {
+        clip(
+            &t,
+            if kind == Kind::Stop {
+                REPLY_LIMIT
+            } else {
+                TEXT_LIMIT
+            },
+        )
+    })
     .filter(|t| !t.is_empty());
 
     Some(Event {
@@ -422,10 +435,18 @@ mod tests {
     #[test]
     fn long_text_is_cut_to_one_line() {
         let long = format!("line one\n{}", "x".repeat(500));
-        let clipped = clip(&long);
+        let clipped = clip(&long, TEXT_LIMIT);
         assert!(!clipped.contains('\n'));
         assert_eq!(clipped.chars().count(), TEXT_LIMIT);
         assert!(clipped.ends_with('…'));
+        // A reply is kept longer than a prompt.
+        let longer = "y".repeat(1_000);
+        let reply = json!({"session_id": "s", "last_assistant_message": longer});
+        let stop = normalize(Agent::Claude, "Stop", &reply, 1).unwrap();
+        assert_eq!(stop.text.unwrap().chars().count(), REPLY_LIMIT);
+        let prompt = json!({"session_id": "s", "prompt": longer});
+        let asked = normalize(Agent::Claude, "UserPromptSubmit", &prompt, 1).unwrap();
+        assert_eq!(asked.text.unwrap().chars().count(), TEXT_LIMIT);
     }
 
     #[test]

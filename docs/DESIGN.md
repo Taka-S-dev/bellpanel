@@ -45,7 +45,8 @@ Two binaries from one crate:
   second server would compete with it for nothing.
 
 Each event is appended with a single `write` to a file opened in append mode,
-and lines stay short (texts are cut to 200 characters). That concurrent hooks
+and lines stay short (texts are cut to 200 characters, a finished turn's
+reply to 600). That concurrent hooks
 never interleave inside a line is relied on, not measured.
 
 ## 3. Event format
@@ -65,7 +66,7 @@ One JSON object per line, version 1:
 | `host_pid`, `host_exe` | the nearest ancestor process owning a visible window (§5) |
 | `agent_pid` | the agent's own process, to find its tab (§5) |
 | `pane` | `WEZTERM_PANE`, when the window is WezTerm (§5) |
-| `text` | prompt or last reply, cut to 200 characters |
+| `text` | prompt or last reply, cut to 200 characters (the reply to 600) |
 
 Unknown events are not written: the hook only registers for the ones below.
 
