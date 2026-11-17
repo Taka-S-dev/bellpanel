@@ -17,6 +17,20 @@ pub fn title_names_folder(title: &str, folder: &str) -> bool {
             .any(|part| part.trim().eq_ignore_ascii_case(folder))
 }
 
+/// The folders of `cwd`, innermost first, without the drive. An editor
+/// window is titled with the folder it opened, which is the session's own
+/// folder or, for an agent started in a subfolder, one above it.
+pub fn folders_up(cwd: &str) -> impl Iterator<Item = &str> {
+    cwd.rsplit(['\\', '/'])
+        .filter(|part| !part.is_empty() && !part.ends_with(':'))
+}
+
+/// The first of `titles` naming the innermost folder of `cwd` that any of
+/// them names.
+pub fn titled_for<'a>(titles: impl Iterator<Item = &'a str> + Clone, cwd: &str) -> Option<usize> {
+    folders_up(cwd).find_map(|folder| titles.clone().position(|t| title_names_folder(t, folder)))
+}
+
 pub fn is_editor(exe: &str) -> bool {
     EDITORS.contains(&exe.to_lowercase().as_str())
 }
@@ -65,7 +79,7 @@ mod platform {
         SW_RESTORE,
     };
 
-    use super::{is_editor, is_host_candidate, title_names_folder, Host};
+    use super::{is_editor, is_host_candidate, titled_for, Host};
 
     pub struct Window {
         pub hwnd: isize,
@@ -341,34 +355,26 @@ mod platform {
     }
 
     /// The window to bring forward for a session, if one can be found.
-    pub fn pick_window(
-        host_pid: Option<u32>,
-        host_exe: Option<&str>,
-        folder: &str,
-    ) -> Option<isize> {
+    pub fn pick_window(host_pid: Option<u32>, host_exe: Option<&str>, cwd: &str) -> Option<isize> {
         let all = windows();
         if let (Some(pid), Some(exe)) = (host_pid, host_exe) {
             // A reused pid would point at an unrelated program.
             if exe_of(pid).is_some_and(|now| now.eq_ignore_ascii_case(exe)) {
                 let own: Vec<&Window> = all.iter().filter(|w| w.pid == pid).collect();
-                if let Some(w) = own
-                    .iter()
-                    .find(|w| title_names_folder(&w.title, folder))
-                    .or(own.first())
-                {
+                let titled = titled_for(own.iter().map(|w| w.title.as_str()), cwd);
+                if let Some(w) = titled.map(|i| own[i]).or(own.first().copied()) {
                     return Some(w.hwnd);
                 }
             }
         }
         let procs = processes();
-        let named: Vec<&Window> = all
+        let editors: Vec<&Window> = all
             .iter()
-            .filter(|w| title_names_folder(&w.title, folder))
+            .filter(|w| procs.get(&w.pid).is_some_and(|(_, exe)| is_editor(exe)))
             .collect();
-        named
-            .iter()
-            .find(|w| procs.get(&w.pid).is_some_and(|(_, exe)| is_editor(exe)))
-            .or(named.first())
+        titled_for(editors.iter().map(|w| w.title.as_str()), cwd)
+            .map(|i| editors[i])
+            .or_else(|| titled_for(all.iter().map(|w| w.title.as_str()), cwd).map(|i| &all[i]))
             .map(|w| w.hwnd)
     }
 
@@ -432,7 +438,11 @@ mod platform {
     pub fn exe_path(_pid: u32) -> Option<std::path::PathBuf> {
         None
     }
-    pub fn pick_window(_: Option<u32>, _: Option<&str>, _: &str) -> Option<isize> {
+    pub fn pick_window(
+        _host_pid: Option<u32>,
+        _host_exe: Option<&str>,
+        _cwd: &str,
+    ) -> Option<isize> {
         None
     }
     pub fn focus(_: isize) -> bool {
@@ -475,7 +485,7 @@ pub fn focus_session(target: &Target) -> Result<Option<String>, String> {
     let hwnd = pick_window(
         host.as_ref().map(|h| h.pid),
         host.as_ref().map(|h| h.exe.as_str()),
-        folder,
+        &target.cwd,
     )
     .ok_or_else(|| format!("no window found for {folder}"))?;
 
@@ -502,6 +512,20 @@ mod tests {
         assert!(title_names_folder(title, "BellPanel"));
         assert!(!title_names_folder(title, "agent"));
         assert!(!title_names_folder(title, ""));
+    }
+
+    #[test]
+    fn a_subfolder_session_opens_the_window_of_the_folder_above() {
+        let titles = [
+            "a.rs - bellpanel - Visual Studio Code",
+            "b.cs - notes - Visual Studio Code",
+            "c.md - work - Visual Studio Code",
+        ];
+        let pick = |cwd| titled_for(titles.iter().copied(), cwd);
+        assert_eq!(pick(r"c:\Users\me\work\notes\drafts"), Some(1));
+        assert_eq!(pick("c:/Users/me/work/notes/"), Some(1));
+        assert_eq!(pick(r"c:\Users\me\work\other"), Some(2));
+        assert_eq!(pick(r"c:\Users\me\elsewhere"), None);
     }
 
     #[test]

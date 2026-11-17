@@ -109,9 +109,10 @@ the same kind in one folder cannot be told apart. `bellpanel which-host
 
 On click, the TUI lists that process's windows. When there are several (VS Code
 runs every window in one process) it picks the one whose title contains the
-session's folder name. If the process is gone, or its executable name no
-longer matches (a reused pid), it falls back to any editor window titled with
-the folder name.
+session's folder name. An agent started in a subfolder of what the editor
+opened has no window of that name, so the folders above it are tried next,
+innermost first. If the process is gone, or its executable name no longer
+matches (a reused pid), it falls back to any editor window titled that way.
 
 Focusing follows the spike: attach to the foreground thread's input,
 `BringWindowToTop`, `SetForegroundWindow`, detach; act on mouse **up**; check
