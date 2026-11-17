@@ -192,6 +192,8 @@ pub enum Order {
 pub enum MarkKind {
     Seen,
     Hidden,
+    /// A hidden row brought back.
+    Shown,
 }
 
 /// Something the user did to a row, kept in `marks.jsonl` so a restart does
@@ -211,6 +213,11 @@ pub struct Board {
     dismissed: HashMap<Key, u64>,
     last_by_agent: HashMap<Agent, u64>,
     log: VecDeque<Event>,
+    /// Leave out sessions with no window: agents run by a script or another
+    /// program, which nobody sits in front of. They neither list nor ring.
+    pub hide_windowless: bool,
+    /// List hidden rows too, to look for one or bring it back.
+    pub show_hidden: bool,
 }
 
 impl Board {
@@ -346,7 +353,9 @@ impl Board {
             return false;
         }
 
-        let alert = next != entry.state && matches!(next, State::Waiting | State::Done);
+        let unlisted = self.hide_windowless && entry.host_pid.is_none();
+        let alert =
+            next != entry.state && matches!(next, State::Waiting | State::Done) && !unlisted;
         if next != entry.state {
             entry.state = next;
             entry.since = event.at;
@@ -435,21 +444,8 @@ impl Board {
         let mut rows: Vec<&Session> = self
             .sessions
             .values()
-            .filter(|s| now.saturating_sub(s.last_at) < STALE_MS)
-            .filter(|s| {
-                let quiet = s.state == State::Idle || (s.state == State::Done && s.seen);
-                !quiet || now.saturating_sub(s.last_at) < QUIET_VISIBLE_MS
-            })
-            .filter(|s| {
-                s.ended_at.is_none_or(|at| {
-                    s.wants_attention() || now.saturating_sub(at) < ENDED_VISIBLE_MS
-                })
-            })
-            .filter(|s| {
-                self.dismissed
-                    .get(&s.key())
-                    .is_none_or(|&at| s.last_at > at)
-            })
+            .filter(|s| self.current(s, now))
+            .filter(|s| self.show_hidden || !self.is_hidden(s, now))
             .collect();
         match order {
             Order::Urgency => rows.sort_by(|a, b| {
@@ -469,6 +465,37 @@ impl Board {
         rows
     }
 
+    /// Whether a session is recent and has not been gone for long. Others
+    /// are never listed.
+    fn current(&self, s: &Session, now: u64) -> bool {
+        now.saturating_sub(s.last_at) < STALE_MS
+            && s.ended_at
+                .is_none_or(|at| s.wants_attention() || now.saturating_sub(at) < ENDED_VISIBLE_MS)
+            && !(self.hide_windowless && s.host_pid.is_none())
+    }
+
+    /// Whether the user hid this row: dismissed it and it has done nothing since.
+    pub fn is_dismissed(&self, s: &Session) -> bool {
+        self.dismissed
+            .get(&s.key())
+            .is_some_and(|&at| s.last_at <= at)
+    }
+
+    /// Whether a current session is left out of the list: dismissed, or
+    /// with nothing for the user for `QUIET_VISIBLE_MS`.
+    pub fn is_hidden(&self, s: &Session, now: u64) -> bool {
+        let quiet = s.state == State::Idle || (s.state == State::Done && s.seen);
+        (quiet && now.saturating_sub(s.last_at) >= QUIET_VISIBLE_MS) || self.is_dismissed(s)
+    }
+
+    /// How many current sessions are hidden.
+    pub fn hidden_count(&self, now: u64) -> usize {
+        self.sessions
+            .values()
+            .filter(|s| self.current(s, now) && self.is_hidden(s, now))
+            .count()
+    }
+
     /// Marks every finished session as seen. Returns the marks to store.
     pub fn acknowledge_all(&mut self) -> Vec<Mark> {
         let keys: Vec<Key> = self
@@ -478,6 +505,21 @@ impl Board {
             .map(Session::key)
             .collect();
         keys.iter().filter_map(|k| self.acknowledge(k)).collect()
+    }
+
+    /// Brings a dismissed row back. Returns the mark to store.
+    pub fn restore(&mut self, key: &Key) -> Option<Mark> {
+        let s = self.sessions.get(key)?;
+        if !self.is_dismissed(s) {
+            return None;
+        }
+        self.dismissed.remove(key);
+        Some(Mark {
+            mark: MarkKind::Shown,
+            agent: s.agent,
+            session: s.id.clone(),
+            at: s.last_at,
+        })
     }
 
     /// Marks a finished session as seen. Returns the mark to store, so it
@@ -524,6 +566,9 @@ impl Board {
             }
             MarkKind::Hidden => {
                 self.dismissed.insert(key, mark.at);
+            }
+            MarkKind::Shown => {
+                self.dismissed.remove(&key);
             }
         }
     }
@@ -676,6 +721,49 @@ mod tests {
         // The next turn starts without it.
         b.apply(&ev(Agent::Claude, "a", Kind::Prompt, 9_000));
         assert_eq!(b.rows(9_000)[0].tool, None);
+    }
+
+    #[test]
+    fn hidden_rows_are_counted_shown_on_request_and_restored() {
+        let mut b = Board::default();
+        b.apply(&ev(Agent::Claude, "a", Kind::Prompt, 0));
+        b.apply(&ev(Agent::Claude, "b", Kind::Prompt, 0));
+        let key = (Agent::Claude, "a".to_string());
+        b.dismiss(&key);
+        assert_eq!((states(&b, 10).len(), b.hidden_count(10)), (1, 1));
+        b.show_hidden = true;
+        assert_eq!(states(&b, 10).len(), 2);
+        b.show_hidden = false;
+        let mark = b.restore(&key).unwrap();
+        assert_eq!(mark.mark, MarkKind::Shown);
+        assert_eq!((states(&b, 10).len(), b.hidden_count(10)), (2, 0));
+        // After a restart the stored marks give the same list.
+        let mut again = Board::default();
+        again.apply(&ev(Agent::Claude, "a", Kind::Prompt, 0));
+        again.apply_mark(&Mark {
+            mark: MarkKind::Hidden,
+            agent: Agent::Claude,
+            session: "a".into(),
+            at: 0,
+        });
+        assert_eq!(states(&again, 10).len(), 0);
+        again.apply_mark(&mark);
+        assert_eq!(states(&again, 10).len(), 1);
+    }
+
+    #[test]
+    fn windowless_sessions_can_be_left_out_and_then_do_not_ring() {
+        let mut b = Board {
+            hide_windowless: true,
+            ..Board::default()
+        };
+        b.apply(&ev(Agent::Claude, "script", Kind::Prompt, 0));
+        assert!(!b.apply(&ev(Agent::Claude, "script", Kind::Stop, 1_000)));
+        let mut seen = ev(Agent::Claude, "desk", Kind::Prompt, 0);
+        seen.host_pid = Some(7);
+        b.apply(&seen);
+        assert_eq!(states(&b, 2_000), [("desk".into(), State::Working)]);
+        assert_eq!(b.hidden_count(2_000), 0);
     }
 
     #[test]

@@ -376,6 +376,10 @@ struct Settings {
     /// glyphs every icon is an empty box.
     icons: bool,
     bell: Bell,
+    /// Leave out sessions with no window (agents run by a script or
+    /// another program). Off by default: a session whose window the hook
+    /// could not find would vanish with them.
+    hide_windowless: bool,
 }
 
 impl Settings {
@@ -461,6 +465,7 @@ fn run_dashboard() -> io::Result<()> {
         watched_at: std::time::Instant::now(),
         started: std::time::Instant::now(),
     };
+    app.board.hide_windowless = app.settings.hide_windowless;
     // Replay what is already there without ringing for it, then what the
     // user had already dealt with.
     for event in app.tail.read_new()? {
@@ -605,9 +610,31 @@ fn event_loop(terminal: &mut ratatui::DefaultTerminal, app: &mut App) -> io::Res
                             keep(app, Some(mark));
                         }
                     }
+                    KeyCode::Char('a') => {
+                        app.board.show_hidden = !app.board.show_hidden;
+                        let shown = if app.board.show_hidden {
+                            "hidden rows listed too, dim (d brings one back)"
+                        } else {
+                            "hidden rows left out"
+                        };
+                        app.status = Some((shown.to_string(), false));
+                    }
                     KeyCode::Char('m') => {
                         app.settings.bell = app.settings.bell.next();
                         save_settings(app, app.settings.bell.label().to_string());
+                    }
+                    KeyCode::Char('w') => {
+                        app.settings.hide_windowless = !app.settings.hide_windowless;
+                        app.board.hide_windowless = app.settings.hide_windowless;
+                        save_settings(
+                            app,
+                            if app.settings.hide_windowless {
+                                "sessions with no window left out"
+                            } else {
+                                "sessions with no window listed"
+                            }
+                            .to_string(),
+                        );
                     }
                     KeyCode::Enter => open_selected(app),
                     KeyCode::Char(' ') => {
@@ -649,8 +676,11 @@ fn event_loop(terminal: &mut ratatui::DefaultTerminal, app: &mut App) -> io::Res
                         });
                     }
                     KeyCode::Char('d') => {
-                        if let Some(key) = app.selected.take() {
-                            let mark = app.board.dismiss(&key);
+                        if let Some(key) = app.selected.clone() {
+                            let mark = match app.board.restore(&key) {
+                                Some(mark) => Some(mark),
+                                None => app.board.dismiss(&key),
+                            };
                             keep(app, mark);
                         }
                     }
@@ -924,12 +954,24 @@ fn sort_label(order: Order) -> &'static str {
     }
 }
 
-fn sessions_title(timeline: usize, order: Order) -> Line<'static> {
-    let sorted = if order == Order::Urgency {
-        " · by urgency"
-    } else {
-        ""
-    };
+/// How the title tells of hidden rows, and the key that lists them.
+fn hidden_note(hidden: usize, listed: bool) -> String {
+    match (hidden, listed) {
+        (0, _) => String::new(),
+        (n, true) => format!(" · {n} hidden listed (a)"),
+        (n, false) => format!(" · {n} hidden (a)"),
+    }
+}
+
+fn sessions_title(timeline: usize, order: Order, hidden: &str) -> Line<'static> {
+    let sorted = format!(
+        "{}{hidden}",
+        if order == Order::Urgency {
+            " · by urgency"
+        } else {
+            ""
+        }
+    );
     if timeline == 0 {
         return Line::raw(format!(" sessions{sorted} "));
     }
@@ -1023,15 +1065,29 @@ fn age_style(session: &Session, now: u64, newest: Option<u64>) -> Style {
     }
 }
 
+/// How one row is drawn apart from its session.
+#[derive(Clone, Copy)]
+struct RowLook {
+    /// The pointer is on its folder link.
+    hovered: bool,
+    icons: bool,
+    /// A hidden row, listed on request.
+    hidden: bool,
+}
+
 fn session_line(
     session: &Session,
     now: u64,
     newest: Option<u64>,
     frame: usize,
     timeline: usize,
-    hovered: bool,
-    icons: bool,
+    look: RowLook,
 ) -> Line<'static> {
+    let RowLook {
+        hovered,
+        icons,
+        hidden,
+    } = look;
     let link = if hovered {
         Style::new()
             .fg(LINK_COLOR)
@@ -1072,7 +1128,11 @@ fn session_line(
         (_, _, Some(prompt)) => spans.push(Span::styled(format!("> {}", plain(prompt)), dim)),
         _ => {}
     }
-    Line::from(spans)
+    if hidden {
+        Line::from(spans).style(dim)
+    } else {
+        Line::from(spans)
+    }
 }
 
 fn header(app: &App, now: u64) -> Line<'static> {
@@ -1463,14 +1523,36 @@ fn draw(frame: &mut ratatui::Frame, app: &mut App) {
                 newest,
                 (app.started.elapsed().as_millis() / SPINNER_FRAME.as_millis()) as usize,
                 timeline,
-                app.hover == Some(i),
-                app.settings.icons,
+                RowLook {
+                    hovered: app.hover == Some(i),
+                    icons: app.settings.icons,
+                    hidden: app.board.show_hidden && app.board.is_hidden(s, now),
+                },
             ))
         })
         .collect();
     let empty = items.is_empty();
+    let hidden = app.board.hidden_count(now);
+    // Rows the box has no room for, counted from the last draw's scroll.
+    let room = list_area.height.saturating_sub(2) as usize;
+    let above = app.list_offset.min(rows.len());
+    let below = rows.len().saturating_sub(app.list_offset + room);
+    let more = match (above, below) {
+        (0, 0) => String::new(),
+        (0, b) => format!(" {b} more below "),
+        (a, 0) => format!(" {a} more above "),
+        (a, b) => format!(" {a} more above · {b} below "),
+    };
     let list = List::new(items)
-        .block(Block::bordered().title(sessions_title(timeline, app.settings.sort)))
+        .block(
+            Block::bordered()
+                .title(sessions_title(
+                    timeline,
+                    app.settings.sort,
+                    &hidden_note(hidden, app.board.show_hidden),
+                ))
+                .title_bottom(Line::styled(more, Style::new().add_modifier(Modifier::DIM))),
+        )
         // A tinted background, not reversed colours: reversing turns every
         // coloured timeline cell into a coloured block.
         .highlight_style(Style::new().bg(SELECTED_BG));
@@ -1481,11 +1563,8 @@ fn draw(frame: &mut ratatui::Frame, app: &mut App) {
     app.list_offset = state.offset();
     app.rows_area = Block::bordered().inner(list_area);
     if empty {
-        let hint = Paragraph::new(format!(
-            "No sessions yet. Run `bellpanel install`, restart your agents, and they appear here.\nEvents: {}",
-            app.tail.path().display()
-        ))
-        .style(Style::new().add_modifier(Modifier::DIM));
+        let hint =
+            Paragraph::new(empty_hint(app, hidden)).style(Style::new().add_modifier(Modifier::DIM));
         frame.render_widget(hint, app.rows_area);
     }
 
@@ -1540,6 +1619,28 @@ fn draw(frame: &mut ratatui::Frame, app: &mut App) {
     if app.show_keys {
         draw_keys(frame, area);
     }
+}
+
+/// What an empty list says: what to do next depends on why it is empty.
+fn empty_hint(app: &App, hidden: usize) -> String {
+    if hidden > 0 {
+        return format!("Nothing to show: {hidden} hidden. Press a to list them.");
+    }
+    if app.agents.is_empty() {
+        return format!(
+            "No sessions yet. Run `bellpanel install`, restart your agents, and they appear here.\nEvents: {}",
+            app.tail.path().display()
+        );
+    }
+    let names: Vec<&str> = app.agents.iter().map(|a| a.name()).collect();
+    let mut hint = format!(
+        "No sessions in the last while. Hooks are set up for {}; an agent started before that needs a restart to read them.",
+        names.join(", ")
+    );
+    if app.agents.contains(&Agent::Codex) {
+        hint.push_str("\nCodex runs them only once trusted: open `codex` and use /hooks.");
+    }
+    hint
 }
 
 /// The `?` key list, over the middle of the screen.
@@ -1658,6 +1759,36 @@ mod tests {
         let rows = screen(&mut app, 140, 12);
         let row = rows.iter().find(|r| r.contains("api")).unwrap();
         assert!(row.contains("Bash 3s  > fix the login"), "{row}");
+    }
+
+    #[test]
+    fn hidden_rows_are_counted_in_the_title_and_listed_on_request() {
+        let now = now_ms();
+        let mut app = app_with(&[
+            event("api", Kind::Prompt, now - 9_000, "one"),
+            event("web", Kind::Prompt, now - 9_000, "two"),
+        ]);
+        app.board.dismiss(&(Agent::Claude, "web".into()));
+        let rows = screen(&mut app, 100, 12);
+        assert!(rows[1].contains("1 hidden (a)"), "{}", rows[1]);
+        assert!(!rows.iter().any(|r| r.contains("web")));
+        app.board.show_hidden = true;
+        let rows = screen(&mut app, 100, 12);
+        assert!(rows[1].contains("1 hidden listed (a)"), "{}", rows[1]);
+        assert!(rows.iter().any(|r| r.contains("web")));
+    }
+
+    #[test]
+    fn rows_that_do_not_fit_are_counted_under_the_list() {
+        let now = now_ms();
+        let events: Vec<_> = (0..9)
+            .map(|i| event(&format!("s{i}"), Kind::Prompt, now - 9_000 + i, "x"))
+            .collect();
+        let mut app = app_with(&events);
+        app.settings.events = EventsMode::Off;
+        // 8 rows: header, border, 4 sessions, border, footer.
+        let rows = screen(&mut app, 100, 8);
+        assert!(rows[6].contains("5 more below"), "{}", rows[6]);
     }
 
     #[test]

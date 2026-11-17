@@ -25,6 +25,7 @@ The column after the agent is the app the session runs in: `code` (VS Code),
   that is getting on from one that is stuck.
 - A session you have dealt with (seen, or idle) leaves the list 30 minutes
   after it last did something, and comes back when it does something new.
+  The title counts the rows left out, and `a` lists them too.
 - Sessions keep their place, in the order they appeared, so a row never moves
   as you reach for it. Press `s` to sort by urgency instead (waiting first,
   then unseen finishes, newest first); the choice is remembered. In either

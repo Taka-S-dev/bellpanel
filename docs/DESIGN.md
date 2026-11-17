@@ -167,7 +167,9 @@ nothing.
 
 A session with no window (an agent run by a script, `claude -p`) is hidden a
 minute after it ends even when its finish was not seen: nobody is waiting for
-it. A session with no event for 12 hours is hidden. One with nothing for the
+it. `w` leaves such sessions out altogether, and then they do not ring
+either. That is off by default, because a session whose window the hook
+could not find would go with them. A session with no event for 12 hours is hidden. One with nothing for the
 user, idle or finished and seen, is hidden 30 minutes after its last event and
 comes back with its next one.
 
@@ -178,6 +180,15 @@ above), and the choice is kept in `settings.json`. So that the newest finish
 can be found without the rows moving, the newest unseen finish, however old,
 and any unseen finish under five minutes old show their age in bold green;
 other ages are dim.
+
+The sessions box counts the rows left out in its title. `a` lists them too,
+dim, until it is pressed again; `d` on one the user hid brings it back (a
+`shown` mark). Rows the box has no room for are counted on its bottom
+border. A working row shows the tool it last finished and the time since,
+before the prompt.
+
+When the selected row leaves the list, the selection goes to the row now in
+its place, not to the top.
 
 "Seen" means the row was opened or acknowledged with a key. Seen and hidden
 rows are written to `marks.jsonl` and re-applied after the events are
