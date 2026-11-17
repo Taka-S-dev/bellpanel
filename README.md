@@ -13,7 +13,7 @@ the terminal bell, and going to the room is one click.
 ┌ sessions · last 20 min   ━ working  ━ waiting  ✓ finished  · idle ────────────┐
 │● wait  codex   wt   infra                 2m  ······━━━━━━━━━━━━━━  shell      │
 │✓ done  claude  code 日本語プロジェクト    0s  ··━━━✓····━━━━━━━━━✓  テストを書 │
-│◐ work  copilot wez  api                   1m  ━━━━━━━━━━━━━━━━━━━━  > fix the  │
+│⠋ work  copilot wez  api                   1m  ━━━━━━━━━━━━━━━━━━━━  > fix the  │
 └────────────────────────────────────────────────────────────────────────────────┘
 ```
 

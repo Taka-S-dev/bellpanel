@@ -20,8 +20,17 @@ use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, List, ListItem, ListState, Paragraph};
 use unicode_width::UnicodeWidthChar;
 
+/// How often the loop looks for new events and redraws when nothing moves.
 const TICK: Duration = Duration::from_millis(250);
-const SPINNER: [&str; 4] = ["◐", "◓", "◑", "◒"];
+/// One spinner frame, the pace braille spinners are usually run at (80 to
+/// 100 ms); the loop redraws this often only while a session works.
+const SPINNER_FRAME: Duration = Duration::from_millis(100);
+/// How often running processes are listed while a session waits.
+const WATCH_EVERY: Duration = Duration::from_secs(1);
+/// Braille dots: one column wide everywhere. The circle quarters used before
+/// mix East Asian ambiguous widths (◐ ◑) with narrow ones (◓ ◒), so a
+/// terminal drawing ambiguous characters wide shifted the row every frame.
+const SPINNER: [&str; 10] = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
 /// The timeline column: one slot per minute, up to the last half hour.
 const TIMELINE_SLOTS: usize = 30;
 const SLOT_MS: u64 = 60_000;
@@ -369,7 +378,11 @@ struct App {
     attention_asked: bool,
     /// New processes while a session waits, to see an approved command start.
     commands: CommandWatch,
-    tick: usize,
+    /// When processes were last listed for `commands`.
+    watched_at: std::time::Instant,
+    /// When the dashboard started; the spinner's frame follows the clock, so
+    /// keys pressed do not speed it up.
+    started: std::time::Instant,
 }
 
 fn run_dashboard() -> io::Result<()> {
@@ -390,7 +403,8 @@ fn run_dashboard() -> io::Result<()> {
         show_keys: false,
         attention_asked: false,
         commands: CommandWatch::default(),
-        tick: 0,
+        watched_at: std::time::Instant::now(),
+        started: std::time::Instant::now(),
     };
     // Replay what is already there without ringing for it, then what the
     // user had already dealt with.
@@ -479,8 +493,9 @@ fn event_loop(terminal: &mut ratatui::DefaultTerminal, app: &mut App) -> io::Res
                 ))
             }
         }
-        // Once a second: listing processes is too costly for every tick.
-        if app.tick.is_multiple_of(4) {
+        // Listing processes is too costly for every redraw.
+        if app.watched_at.elapsed() >= WATCH_EVERY {
+            app.watched_at = std::time::Instant::now();
             watch_commands(app);
         }
         fade_status(app);
@@ -498,9 +513,12 @@ fn event_loop(terminal: &mut ratatui::DefaultTerminal, app: &mut App) -> io::Res
             write_raw(b"\x1b]1337;RequestAttention=no\x07");
             app.attention_asked = false;
         }
-        app.tick = app.tick.wrapping_add(1);
-
-        if !event::poll(TICK)? {
+        let working = app
+            .board
+            .rows(now_ms())
+            .iter()
+            .any(|s| s.state == State::Working);
+        if !event::poll(if working { SPINNER_FRAME } else { TICK })? {
             continue;
         }
         match event::read()? {
@@ -748,7 +766,7 @@ fn display_width(text: &str) -> usize {
         .sum()
 }
 
-fn state_cell(session: &Session, tick: usize) -> Span<'static> {
+fn state_cell(session: &Session, frame: usize) -> Span<'static> {
     match session.state {
         State::Waiting => Span::styled(
             "● wait ",
@@ -759,7 +777,7 @@ fn state_cell(session: &Session, tick: usize) -> Span<'static> {
             Style::new().fg(DONE_COLOR).add_modifier(Modifier::BOLD),
         ),
         State::Done => Span::styled("✓ done ", Style::new().add_modifier(Modifier::DIM)),
-        State::Working => Span::raw(format!("{} work ", SPINNER[tick % SPINNER.len()])),
+        State::Working => Span::raw(format!("{} work ", SPINNER[frame % SPINNER.len()])),
         State::Idle => Span::styled("  idle ", Style::new().add_modifier(Modifier::DIM)),
         State::Ended => Span::styled("  ended", Style::new().add_modifier(Modifier::DIM)),
     }
@@ -874,7 +892,7 @@ fn agent_cell(agent: Agent, icons: bool) -> Span<'static> {
 fn session_line(
     session: &Session,
     now: u64,
-    tick: usize,
+    frame: usize,
     timeline: usize,
     hovered: bool,
     icons: bool,
@@ -889,7 +907,7 @@ fn session_line(
     let dim = Style::new().add_modifier(Modifier::DIM);
     let mut spans =
         vec![
-            state_cell(session, tick),
+            state_cell(session, frame),
             Span::raw(" "),
             agent_cell(session.agent, icons),
             Span::styled(
@@ -1264,7 +1282,7 @@ fn draw(frame: &mut ratatui::Frame, app: &mut App) {
             ListItem::new(session_line(
                 s,
                 now,
-                app.tick,
+                (app.started.elapsed().as_millis() / SPINNER_FRAME.as_millis()) as usize,
                 timeline,
                 app.hover == Some(i),
                 app.settings.icons,
