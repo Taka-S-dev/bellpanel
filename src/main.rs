@@ -148,6 +148,10 @@ fn main() {
             print_usage();
             Ok(())
         }
+        Some("-V" | "--version" | "version") => {
+            println!("bellpanel {}", env!("CARGO_PKG_VERSION"));
+            Ok(())
+        }
         Some(other) => {
             eprintln!("unknown command: {other}\n");
             print_usage();
@@ -166,7 +170,11 @@ fn print_usage() {
          bellpanel install     add hooks to the agents found here (Claude Code, Copilot CLI, Codex)\n\
          bellpanel uninstall   remove them\n\
          \n  --dry-run           print what would change, write nothing\n\
-           --agents a,b        install for these agents only (claude, copilot, codex)\n\
+         \x20 --agents a,b        install for these agents only (claude, copilot, codex)\n\
+         \nWhen a click opens the wrong window, or none:\n\
+         bellpanel which-host <agent> <dir>   say which window a session there would open\n\
+         bellpanel open <agent> <dir>         open it\n\
+         \nbellpanel --version   print the version\n\
          \nEvents: {}",
         store::events_path().display()
     );
