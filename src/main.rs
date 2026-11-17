@@ -68,7 +68,7 @@ const KEYS: [(&str, &str); 10] = [
     ("i", "Nerd Font icons on or off"),
     ("wheel", "move the selection"),
     ("?", "this list"),
-    ("q, Esc", "quit"),
+    ("q", "quit"),
 ];
 /// How long an ordinary status message stays; errors stay three times as long.
 const STATUS_SECS: u64 = 5;
@@ -421,6 +421,12 @@ struct App {
     hover: Option<usize>,
     /// A window being brought forward on another thread; its status line.
     opening: Option<mpsc::Receiver<(String, bool)>>,
+    /// Another row was asked for while that was going on: open the selected
+    /// one when it is done.
+    open_next: bool,
+    /// Where the selection was in the list at the last draw, so that it
+    /// stays in place when its row goes.
+    selected_at: usize,
     /// The bell has rung and the request has not been withdrawn yet.
     attention_asked: bool,
     /// New processes while a session waits, to see an approved command start.
@@ -446,6 +452,8 @@ fn run_dashboard() -> io::Result<()> {
         status: None,
         hover: None,
         opening: None,
+        open_next: false,
+        selected_at: 0,
         status_seen: None,
         show_keys: false,
         attention_asked: false,
@@ -525,6 +533,9 @@ fn event_loop(terminal: &mut ratatui::DefaultTerminal, app: &mut App) -> io::Res
                 Err(mpsc::TryRecvError::Empty) => {}
                 Err(mpsc::TryRecvError::Disconnected) => app.opening = None,
             }
+            if app.opening.is_none() && std::mem::take(&mut app.open_next) {
+                open_selected(app);
+            }
         }
         let mut ring = false;
         match app.tail.read_new() {
@@ -578,9 +589,22 @@ fn event_loop(terminal: &mut ratatui::DefaultTerminal, app: &mut App) -> io::Res
                     key.code == KeyCode::Char('c') && key.modifiers.contains(KeyModifiers::CONTROL);
                 match key.code {
                     _ if ctrl_c => return Ok(()),
-                    KeyCode::Char('q') | KeyCode::Esc => return Ok(()),
+                    // Not Esc: the dashboard stays open all day, and Esc is
+                    // pressed out of habit to leave whatever has the keyboard.
+                    KeyCode::Char('q') => return Ok(()),
                     KeyCode::Char('j') | KeyCode::Down => move_selection(app, 1),
                     KeyCode::Char('k') | KeyCode::Up => move_selection(app, -1),
+                    KeyCode::Char('g') | KeyCode::Home => move_selection(app, isize::MIN / 2),
+                    KeyCode::Char('G') | KeyCode::End => move_selection(app, isize::MAX / 2),
+                    KeyCode::Tab => next_wanting(app, true),
+                    KeyCode::BackTab => next_wanting(app, false),
+                    KeyCode::Char('A') => {
+                        let marks = app.board.acknowledge_all();
+                        app.status = Some((format!("marked {} seen", marks.len()), false));
+                        for mark in marks {
+                            keep(app, Some(mark));
+                        }
+                    }
                     KeyCode::Char('m') => {
                         app.settings.bell = app.settings.bell.next();
                         save_settings(app, app.settings.bell.label().to_string());
@@ -721,6 +745,29 @@ fn save_settings(app: &mut App, shown: String) {
     });
 }
 
+/// Selects the next (or previous) row that waits or has an unseen finish,
+/// going round the list.
+fn next_wanting(app: &mut App, forward: bool) {
+    let rows = app.board.rows_in(now_ms(), app.settings.sort);
+    let count = rows.len();
+    let current = app
+        .selected
+        .as_ref()
+        .and_then(|k| rows.iter().position(|s| s.key() == *k));
+    let found = (1..=count)
+        .map(|step| match (current, forward) {
+            (Some(i), true) => (i + step) % count,
+            (Some(i), false) => (i + count - step % count) % count,
+            (None, true) => step - 1,
+            (None, false) => count - step,
+        })
+        .find(|&i| rows[i].wants_attention());
+    match found {
+        Some(i) => app.selected = Some(rows[i].key()),
+        None => app.status = Some(("nothing waits or is unseen".to_string(), false)),
+    }
+}
+
 fn move_selection(app: &mut App, step: isize) {
     if app.visible.is_empty() {
         return;
@@ -731,7 +778,9 @@ fn move_selection(app: &mut App, step: isize) {
         .and_then(|k| app.visible.iter().position(|v| v == k));
     let next = match current {
         None => 0,
-        Some(i) => (i as isize + step).clamp(0, app.visible.len() as isize - 1) as usize,
+        Some(i) => (i as isize)
+            .saturating_add(step)
+            .clamp(0, app.visible.len() as isize - 1) as usize,
     };
     app.selected = Some(app.visible[next].clone());
 }
@@ -763,6 +812,7 @@ fn fade_status(app: &mut App) {
 /// handled at once afterwards: the selection jumped, clicks and hover were lost.
 fn open_selected(app: &mut App) {
     if app.opening.is_some() {
+        app.open_next = true;
         return;
     }
     let Some(key) = app.selected.clone() else {
@@ -1364,17 +1414,21 @@ fn draw(frame: &mut ratatui::Frame, app: &mut App) {
         .iter()
         .map(|s| display_width(s.folder()).min(FOLDER_WIDTH))
         .collect();
+    // A selection whose row has gone moves to the row now in its place,
+    // not back to the top.
     if app
         .selected
         .as_ref()
         .is_none_or(|k| !app.visible.contains(k))
     {
-        app.selected = app.visible.first().cloned();
+        let at = app.selected_at.min(app.visible.len().saturating_sub(1));
+        app.selected = app.visible.get(at).cloned();
     }
     let selected_index = app
         .selected
         .as_ref()
         .and_then(|k| app.visible.iter().position(|v| v == k));
+    app.selected_at = selected_index.unwrap_or(0);
     let newest = newest_unseen_finish(&rows);
     let items: Vec<ListItem> = rows
         .iter()
@@ -1507,6 +1561,108 @@ fn draw_keys(frame: &mut ratatui::Frame, area: Rect) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn event(session: &str, kind: Kind, at: u64, text: &str) -> bellpanel::event::Event {
+        bellpanel::event::Event {
+            v: bellpanel::event::FORMAT_VERSION,
+            at,
+            agent: Agent::Claude,
+            kind,
+            event: String::new(),
+            session: session.into(),
+            turn: None,
+            cwd: format!("C:\\work\\{session}"),
+            host_pid: None,
+            host_exe: None,
+            agent_pid: None,
+            pane: None,
+            text: (!text.is_empty()).then(|| text.to_string()),
+            automatic: false,
+        }
+    }
+
+    fn app_with(events: &[bellpanel::event::Event]) -> App {
+        let mut app = App {
+            settings: Settings::default(),
+            agents: Vec::new(),
+            board: Board::default(),
+            tail: Tail::open(std::env::temp_dir().join("bellpanel-test-none.jsonl")),
+            selected: None,
+            visible: Vec::new(),
+            visible_folder_widths: Vec::new(),
+            rows_area: Rect::default(),
+            list_offset: 0,
+            status: None,
+            status_seen: None,
+            show_keys: false,
+            hover: None,
+            opening: None,
+            open_next: false,
+            selected_at: 0,
+            attention_asked: false,
+            commands: CommandWatch::default(),
+            watched_at: std::time::Instant::now(),
+            started: std::time::Instant::now(),
+        };
+        for e in events {
+            app.board.apply(e);
+        }
+        app
+    }
+
+    /// The screen as text, one string per row.
+    fn screen(app: &mut App, width: u16, height: u16) -> Vec<String> {
+        let mut terminal =
+            ratatui::Terminal::new(ratatui::backend::TestBackend::new(width, height)).unwrap();
+        terminal.draw(|frame| draw(frame, app)).unwrap();
+        let buffer = terminal.backend().buffer().clone();
+        (0..height)
+            .map(|y| {
+                (0..width)
+                    .map(|x| buffer[(x, y)].symbol().to_string())
+                    .collect()
+            })
+            .collect()
+    }
+
+    #[test]
+    fn the_selection_stays_in_place_when_its_row_goes() {
+        let now = now_ms();
+        let events: Vec<_> = (0..3)
+            .map(|i| event(&format!("s{i}"), Kind::Prompt, now - 9_000 + i, "x"))
+            .collect();
+        let mut app = app_with(&events);
+        screen(&mut app, 100, 12);
+        move_selection(&mut app, 1);
+        screen(&mut app, 100, 12);
+        let gone = app.selected.clone().unwrap();
+        assert_eq!(gone.1, "s1");
+        app.board.dismiss(&gone);
+        screen(&mut app, 100, 12);
+        assert_eq!(app.selected.as_ref().unwrap().1, "s2");
+    }
+
+    #[test]
+    fn tab_goes_round_the_rows_that_want_the_user() {
+        let now = now_ms();
+        let mut app = app_with(&[
+            event("a", Kind::Prompt, now - 9_000, "x"),
+            event("b", Kind::Prompt, now - 8_000, "x"),
+            event("c", Kind::Prompt, now - 7_000, "x"),
+            event("b", Kind::Waiting, now - 6_000, "Bash: ls"),
+            event("c", Kind::Stop, now - 5_000, "done"),
+        ]);
+        screen(&mut app, 100, 12);
+        let picked = |app: &App| app.selected.as_ref().unwrap().1.clone();
+        next_wanting(&mut app, true);
+        assert_eq!(picked(&app), "b");
+        next_wanting(&mut app, true);
+        assert_eq!(picked(&app), "c");
+        next_wanting(&mut app, true);
+        assert_eq!(picked(&app), "b");
+        next_wanting(&mut app, false);
+        assert_eq!(picked(&app), "c");
+    }
 
     #[test]
     fn the_bell_rings_for_what_it_is_set_to() {

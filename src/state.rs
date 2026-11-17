@@ -463,6 +463,17 @@ impl Board {
         rows
     }
 
+    /// Marks every finished session as seen. Returns the marks to store.
+    pub fn acknowledge_all(&mut self) -> Vec<Mark> {
+        let keys: Vec<Key> = self
+            .sessions
+            .values()
+            .filter(|s| s.state == State::Done && !s.seen)
+            .map(Session::key)
+            .collect();
+        keys.iter().filter_map(|k| self.acknowledge(k)).collect()
+    }
+
     /// Marks a finished session as seen. Returns the mark to store, so it
     /// survives a restart, when anything changed.
     pub fn acknowledge(&mut self, key: &Key) -> Option<Mark> {
@@ -645,6 +656,17 @@ mod tests {
         assert_eq!(states(&b, 5_000)[0].1, State::Waiting);
         assert!(!b.apply(&ev(Agent::Codex, "a", Kind::Resumed, 9_000)));
         assert_eq!(states(&b, 9_000)[0].1, State::Working);
+    }
+
+    #[test]
+    fn every_unseen_finish_is_marked_seen_at_once() {
+        let mut b = Board::default();
+        for id in ["a", "b"] {
+            b.apply(&ev(Agent::Claude, id, Kind::Prompt, 0));
+            b.apply(&ev(Agent::Claude, id, Kind::Stop, 1_000));
+        }
+        assert_eq!(b.acknowledge_all().len(), 2);
+        assert_eq!(b.attention_count(2_000), 0);
     }
 
     #[test]

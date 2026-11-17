@@ -102,7 +102,7 @@ after you have used it has hooks that are missing or not trusted.
 | `i` | show Nerd Font icons before agent names (needs Nerd Fonts 3.5 or later for Claude's and OpenAI's) |
 | `j` / `k`, wheel | move |
 | `?` | list these keys |
-| `q`, `Esc` | quit |
+| `q`, `Ctrl+C` | quit |
 
 Seen and hidden rows stay that way after a restart (`marks.jsonl`).
 
