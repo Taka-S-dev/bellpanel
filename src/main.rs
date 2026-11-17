@@ -280,6 +280,9 @@ enum EventsMode {
     /// The selected session's prompts and replies.
     #[default]
     Selected,
+    /// Each listed session's latest event, wrapped to the room there is:
+    /// what every terminal is at, in one look.
+    Latest,
     /// Every session's events in one stream.
     All,
     /// No log: the sessions get the whole pane.
@@ -289,7 +292,8 @@ enum EventsMode {
 impl EventsMode {
     fn next(self) -> EventsMode {
         match self {
-            EventsMode::Selected => EventsMode::All,
+            EventsMode::Selected => EventsMode::Latest,
+            EventsMode::Latest => EventsMode::All,
             EventsMode::All => EventsMode::Off,
             EventsMode::Off => EventsMode::Selected,
         }
@@ -298,6 +302,7 @@ impl EventsMode {
     fn label(self) -> &'static str {
         match self {
             EventsMode::Selected => "events: the selected session",
+            EventsMode::Latest => "events: each session's latest",
             EventsMode::All => "events: every session",
             EventsMode::Off => "events: hidden",
         }
@@ -968,8 +973,14 @@ fn kind_label(kind: Kind) -> &'static str {
 
 /// The event log's lines and title. By default it follows the selected
 /// session, reading like that session's conversation: what was asked, what
-/// came back. `e` switches to every session's events in one stream.
-fn event_log(app: &App, now: u64, rows: usize) -> (Vec<Line<'static>>, Line<'static>) {
+/// came back. `e` switches to each session's latest event, then to every
+/// session's events in one stream.
+fn event_log(
+    app: &App,
+    now: u64,
+    rows: usize,
+    width: usize,
+) -> (Vec<Line<'static>>, Line<'static>) {
     let dim = Style::new().add_modifier(Modifier::DIM);
     // Older records still carry Codex's uninformative end reason "other".
     let text_of = |e: &bellpanel::event::Event| {
@@ -983,6 +994,9 @@ fn event_log(app: &App, now: u64, rows: usize) -> (Vec<Line<'static>>, Line<'sta
         .selected
         .as_ref()
         .filter(|_| app.settings.events == EventsMode::Selected);
+    if app.settings.events == EventsMode::Latest {
+        return latest_events(app, now, rows, width, &text_of);
+    }
     let mut lines: Vec<Line> = match selected {
         Some(key) => app
             .board
@@ -1036,7 +1050,7 @@ fn event_log(app: &App, now: u64, rows: usize) -> (Vec<Line<'static>>, Line<'sta
                 Span::styled(folder, Style::new().add_modifier(Modifier::BOLD)),
                 Span::raw(" "),
                 Span::styled(agent.name(), Style::new().fg(agent_color(*agent))),
-                Span::styled("  (e: every session, then off) ", dim),
+                Span::styled("  (e: each session's latest) ", dim),
             ])
         }
         None => Line::from(vec![
@@ -1045,6 +1059,152 @@ fn event_log(app: &App, now: u64, rows: usize) -> (Vec<Line<'static>>, Line<'sta
         ]),
     };
     (lines, title)
+}
+
+/// Each listed session's latest prompt, wait, approval or finish, in the
+/// list's order. The log's height is shared out between them and each text
+/// wraps into its share, so a few sessions show their whole reply and many
+/// still fit one line each.
+fn latest_events(
+    app: &App,
+    now: u64,
+    rows: usize,
+    width: usize,
+    text_of: &dyn Fn(&bellpanel::event::Event) -> String,
+) -> (Vec<Line<'static>>, Line<'static>) {
+    let dim = Style::new().add_modifier(Modifier::DIM);
+    let latest: Vec<_> = app
+        .board
+        .rows_in(now, app.settings.sort)
+        .into_iter()
+        .filter_map(|s| app.board.session_log(&s.key()).next_back().map(|e| (s, e)))
+        .take(rows)
+        .collect();
+    let indent = 5;
+    let text_width = width.saturating_sub(indent).max(10);
+    let entries: Vec<_> = latest
+        .into_iter()
+        .map(|(s, e)| {
+            let head = vec![
+                Span::styled(format!("{:>4} ", age(now, e.at)), dim),
+                agent_cell(s.agent, app.settings.icons),
+                Span::raw(pad(s.folder(), 20)),
+                Span::styled(kind_label(e.kind), dim),
+            ];
+            // A finish without a text (Copilot's) says nothing; what was
+            // asked tells what the session did.
+            let (text, style) = match (text_of(e), e.kind, &s.prompt) {
+                (t, Kind::Stop, Some(prompt)) if t.is_empty() => {
+                    (format!("> {}", plain(prompt)), dim)
+                }
+                (t, Kind::Prompt, _) => (t, Style::new().add_modifier(Modifier::BOLD)),
+                (t, Kind::Waiting, _) => (t, Style::new().fg(WAIT_COLOR)),
+                (t, _, _) => (t, Style::new()),
+            };
+            (head, text, style)
+        })
+        .collect();
+    // Lines each would take in full: its head, then its wrapped text.
+    let needs: Vec<usize> = entries
+        .iter()
+        .map(|(_, text, _)| 1 + wrap_width(text, text_width, usize::MAX).len())
+        .collect();
+    let mut lines = Vec::new();
+    for ((head, text, style), share) in entries.into_iter().zip(share_rows(&needs, rows)) {
+        if share < 2 {
+            // No room for a second line: the text follows on the same one.
+            let mut line = head;
+            line.push(Span::raw("  "));
+            line.push(Span::styled(text, style));
+            lines.push(Line::from(line));
+            continue;
+        }
+        // The text gets lines of its own, the pane's full width: beside the
+        // head it would be squeezed into a narrow column.
+        lines.push(Line::from(head));
+        for part in wrap_width(&text, text_width, share - 1) {
+            lines.push(Line::from(vec![
+                Span::raw(" ".repeat(indent)),
+                Span::styled(part, style),
+            ]));
+        }
+    }
+    let title = Line::from(vec![
+        Span::raw(" events · each session's latest "),
+        Span::styled(" (e: every event) ", dim),
+    ]);
+    (lines, title)
+}
+
+/// `rows` lines shared out between entries that would take `needs` lines
+/// each: short ones get all they need, and what they leave goes to the long
+/// ones, evenly. Every entry gets at least one line.
+fn share_rows(needs: &[usize], rows: usize) -> Vec<usize> {
+    if needs.iter().sum::<usize>() <= rows {
+        return needs.to_vec();
+    }
+    // The largest cap that fits, so no entry takes more than it while
+    // another is cut shorter.
+    let fits = |cap: usize| needs.iter().map(|&n| n.min(cap)).sum::<usize>() <= rows;
+    let mut cap = 1;
+    while fits(cap + 1) {
+        cap += 1;
+    }
+    let mut shares: Vec<usize> = needs.iter().map(|&n| n.min(cap)).collect();
+    // Lines left over go one each to the first entries that want more.
+    let mut left = rows.saturating_sub(shares.iter().sum());
+    for (share, &need) in shares.iter_mut().zip(needs) {
+        if left == 0 {
+            break;
+        }
+        if need > *share {
+            *share += 1;
+            left -= 1;
+        }
+    }
+    shares
+}
+
+/// Characters a Japanese line does not start with (kinsoku).
+const NO_LINE_START: &str = "、。，．,.)）」』】〕〉》？！?!ー…・";
+
+/// `text` cut into at most `max_lines` pieces of `width` columns each. A
+/// closing mark that would start a line takes the previous character down
+/// with it, and text left over is marked with `…`.
+fn wrap_width(text: &str, width: usize, max_lines: usize) -> Vec<String> {
+    let cols = |s: &str| display_width(s);
+    let mut lines = vec![String::new()];
+    let mut cut = false;
+    for c in text.chars() {
+        let w = UnicodeWidthChar::width(c).unwrap_or(0);
+        let full = lines.len() == max_lines;
+        let line = lines.last_mut().unwrap();
+        if cols(line) + w > width {
+            if full {
+                cut = true;
+                break;
+            }
+            let mut next = String::new();
+            if NO_LINE_START.contains(c) && line.chars().count() > 1 {
+                next.push(line.pop().unwrap());
+            }
+            lines.push(next);
+        }
+        let line = lines.last_mut().unwrap();
+        // A space where the text was broken would indent the next line.
+        if line.is_empty() && c == ' ' {
+            continue;
+        }
+        line.push(c);
+    }
+    if cut {
+        let last = lines.last_mut().unwrap();
+        while !last.is_empty() && cols(last) + 1 > width {
+            last.pop();
+        }
+        last.push('…');
+    }
+    lines
 }
 
 /// Heights of the session box and the event log in a terminal `height` rows
@@ -1133,7 +1293,12 @@ fn draw(frame: &mut ratatui::Frame, app: &mut App) {
     }
 
     if log_area.height > 0 {
-        let (lines, title) = event_log(app, now, log_area.height.saturating_sub(2) as usize);
+        let (lines, title) = event_log(
+            app,
+            now,
+            log_area.height.saturating_sub(2) as usize,
+            log_area.width.saturating_sub(2) as usize,
+        );
         frame.render_widget(
             Paragraph::new(lines).block(Block::bordered().title(title)),
             log_area,
@@ -1248,10 +1413,10 @@ mod tests {
     }
 
     #[test]
-    fn the_events_key_cycles_through_three_views() {
+    fn the_events_key_cycles_through_four_views() {
         let mut mode = EventsMode::default();
         let mut seen = vec![mode];
-        for _ in 0..3 {
+        for _ in 0..4 {
             mode = mode.next();
             seen.push(mode);
         }
@@ -1259,6 +1424,7 @@ mod tests {
             seen,
             [
                 EventsMode::Selected,
+                EventsMode::Latest,
                 EventsMode::All,
                 EventsMode::Off,
                 EventsMode::Selected
@@ -1274,6 +1440,30 @@ mod tests {
             (old.sort, old.events, old.icons),
             (Order::Urgency, EventsMode::Selected, true)
         );
+    }
+
+    #[test]
+    fn wrapping_counts_display_width_and_stops_at_the_line_limit() {
+        assert_eq!(wrap_width("abcdef", 4, 3), ["abcd", "ef"]);
+        assert_eq!(wrap_width("日本語です", 4, 3), ["日本", "語で", "す"]);
+        assert_eq!(wrap_width("abcdefghij", 3, 2), ["abc", "de…"]);
+        assert_eq!(wrap_width("", 4, 3), [""]);
+        // A full stop never starts a line: the character before it moves down too.
+        assert_eq!(wrap_width("ありがとう。", 10, 2), ["ありがと", "う。"]);
+        // A break at a space does not start the next line with it.
+        assert_eq!(wrap_width("abc def", 3, 3), ["abc", "def"]);
+    }
+
+    #[test]
+    fn short_entries_leave_their_lines_to_long_ones() {
+        // Everything fits: each gets what it needs.
+        assert_eq!(share_rows(&[3, 2, 2], 10), [3, 2, 2]);
+        // The short ones keep theirs; the long one takes the rest.
+        assert_eq!(share_rows(&[8, 2, 2], 10), [6, 2, 2]);
+        // Two long ones split what is left evenly.
+        assert_eq!(share_rows(&[9, 9, 2], 10), [4, 4, 2]);
+        // Too little room: one line each.
+        assert_eq!(share_rows(&[5, 5, 5], 3), [1, 1, 1]);
     }
 
     #[test]

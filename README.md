@@ -27,7 +27,8 @@ The column after the agent is the app the session runs in: `code` (VS Code),
   `━` working, yellow `━` waiting for you, `✓` finished, `·` idle.
 - The event log below follows the selected row and reads like that session's
   conversation: your prompts in bold, then what came back. `e` switches it to
-  every session's events in one stream, then hides it.
+  each session's latest event, wrapped to use the room there is, then to every
+  session's events in one stream, then hides it.
 - The terminal bell rings when a session finishes or starts waiting. A
   terminal that turns the bell into a tab mark (terminal-pane in Obsidian
   does) shows which pane wants you. Once no session waits for you, Bellpanel
@@ -92,7 +93,7 @@ after you have used it has hooks that are missing or not trusted.
 | point at a folder name | it lights up, and the footer says which window a click opens |
 | `Space` | mark a finished session as seen |
 | `d` | hide the row until the session does something new |
-| `e` | event log: the selected session's conversation → every session's events → hidden |
+| `e` | event log: the selected session's conversation → each session's latest event, wrapped → every session's events → hidden |
 | `s` | switch between arrival order and urgency order |
 | `i` | show Nerd Font icons before agent names (needs Nerd Fonts 3.5 or later for Claude's and OpenAI's) |
 | `j` / `k`, wheel | move |

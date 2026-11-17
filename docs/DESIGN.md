@@ -207,11 +207,16 @@ in one folder cannot be told apart, as in §5.
 
 The log under the sessions follows the selected row: that session's last 50
 prompts, waits and replies, oldest first, so it reads as the conversation
-without opening the window. `e` switches to one stream of every session's
-events (the last 200), then hides the log so the sessions get the whole pane;
-the choice is kept in `settings.json`. Routine
-tool completions are left out of both; only one that ends a wait is shown, as
-"approved".
+without opening the window. `e` switches to each listed session's latest
+event in the list's order, to see what every terminal is at: the log's height
+is shared out between them, short texts leaving their lines to long ones,
+each text wraps at the pane's full width under
+a line naming the session, Markdown marks and table pipes are dropped, and a finish
+with no text (Copilot's) shows the prompt it answered;
+then to one stream of every session's events (the last 200); then hides the
+log so the sessions get the whole pane. The choice is kept in
+`settings.json`. Routine tool completions are left out of all of them; only
+one that ends a wait is shown, as "approved".
 
 A seen mark covers the session up to its last *finish*: an end or a tool event
 arriving later does not make it unseen again, only a new finish does.
