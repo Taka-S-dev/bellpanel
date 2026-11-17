@@ -1164,28 +1164,46 @@ fn event_log(
         return latest_events(app, now, rows, width, &text_of);
     }
     let mut lines: Vec<Line> = match selected {
-        Some(key) => app
-            .board
-            .session_log(key)
-            .rev()
-            .take(rows)
-            .map(|e| {
+        Some(key) => {
+            // Newest first, each text wrapped under its own head, until the
+            // room is used. No entry takes more than half of it, so a long
+            // reply leaves the prompt it answers in view.
+            let indent = 15;
+            let text_width = width.saturating_sub(indent).max(10);
+            let most = (rows / 2).max(2);
+            let mut lines = Vec::new();
+            for e in app.board.session_log(key).rev() {
+                let left = rows.saturating_sub(lines.len());
+                if left == 0 {
+                    break;
+                }
                 // The person's words stand out; replies and the rest are quieter.
-                let text = match e.kind {
-                    Kind::Prompt if e.automatic => Span::styled(text_of(e), dim),
-                    Kind::Prompt => {
-                        Span::styled(text_of(e), Style::new().add_modifier(Modifier::BOLD))
-                    }
-                    Kind::Waiting => Span::styled(text_of(e), Style::new().fg(WAIT_COLOR)),
-                    _ => Span::raw(text_of(e)),
+                let style = match e.kind {
+                    Kind::Prompt if e.automatic => dim,
+                    Kind::Prompt => Style::new().add_modifier(Modifier::BOLD),
+                    Kind::Waiting => Style::new().fg(WAIT_COLOR),
+                    _ => Style::new(),
                 };
-                Line::from(vec![
-                    Span::styled(format!("{:>4} ", age(now, e.at)), dim),
-                    Span::styled(pad(event_label(e), 9), dim),
-                    text,
-                ])
-            })
-            .collect(),
+                let parts = wrap_width(&text_of(e), text_width, most.min(left));
+                // Collected bottom up, to be turned over below.
+                for (i, part) in parts.into_iter().enumerate().rev() {
+                    let head = if i == 0 {
+                        vec![
+                            Span::styled(format!("{:>4} ", age(now, e.at)), dim),
+                            Span::styled(pad(event_label(e), 9), dim),
+                        ]
+                    } else {
+                        vec![Span::raw(" ".repeat(indent))]
+                    };
+                    lines.push(Line::from(
+                        head.into_iter()
+                            .chain([Span::styled(part, style)])
+                            .collect::<Vec<_>>(),
+                    ));
+                }
+            }
+            lines
+        }
         None => app
             .board
             .log()
@@ -1623,6 +1641,23 @@ mod tests {
                     .collect()
             })
             .collect()
+    }
+
+    #[test]
+    fn the_selected_sessions_log_wraps_long_texts() {
+        let now = now_ms();
+        let reply = "word ".repeat(40);
+        let mut app = app_with(&[
+            event("api", Kind::Prompt, now - 9_000, "fix the login"),
+            event("api", Kind::Stop, now - 3_000, reply.trim()),
+        ]);
+        let rows = screen(&mut app, 60, 16);
+        let log: Vec<&String> = rows.iter().skip(4).collect();
+        let words: usize = log.iter().map(|r| r.matches("word").count()).sum();
+        // Half the log's lines at most, and the prompt it answers stays.
+        assert!(words > 8 && words < 40, "{words}");
+        assert!(log.iter().any(|r| r.contains("fix the login")));
+        assert!(log.iter().any(|r| r.contains("…")));
     }
 
     #[test]

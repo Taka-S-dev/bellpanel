@@ -215,7 +215,8 @@ in one folder cannot be told apart, as in §5.
 
 The log under the sessions follows the selected row: that session's last 50
 prompts, waits and replies, oldest first, so it reads as the conversation
-without opening the window.
+without opening the window. Texts wrap; none takes more than half the log's
+lines, so a long reply leaves the prompt it answers in view.
 
 `e` switches to each listed session's latest event, in the list's order, to
 see what every terminal is at. The log's height is shared out between them,
