@@ -67,6 +67,7 @@ One JSON object per line, version 1:
 | `agent_pid` | the agent's own process, to find its tab (§5) |
 | `pane` | `WEZTERM_PANE`, when the window is WezTerm (§5) |
 | `text` | prompt or last reply, cut to 200 characters (the reply to 600) |
+| `automatic` | `true` on a prompt the agent's tooling submitted (Claude Code's `<task-notification>`), left out otherwise |
 
 Unknown events are not written: the hook only registers for the ones below.
 
@@ -208,16 +209,22 @@ in one folder cannot be told apart, as in §5.
 
 The log under the sessions follows the selected row: that session's last 50
 prompts, waits and replies, oldest first, so it reads as the conversation
-without opening the window. `e` switches to each listed session's latest
-event in the list's order, to see what every terminal is at: the log's height
-is shared out between them, short texts leaving their lines to long ones,
-each text wraps at the pane's full width under
-a line naming the session, Markdown marks and table pipes are dropped, and a finish
-with no text (Copilot's) shows the prompt it answered;
-then to one stream of every session's events (the last 200); then hides the
-log so the sessions get the whole pane. The choice is kept in
-`settings.json`. Routine tool completions are left out of all of them; only
-one that ends a wait is shown, as "approved".
+without opening the window.
+
+`e` switches to each listed session's latest event, in the list's order, to
+see what every terminal is at. The log's height is shared out between them,
+short texts leaving their lines to long ones; each text wraps at the pane's
+full width under a line naming the session, with Markdown marks and table
+pipes dropped; a finish with no text (Copilot's) shows the prompt it
+answered.
+
+`e` again shows one stream of every session's events (the last 200), and
+once more hides the log so the sessions get the whole pane. The choice is
+kept in `settings.json`.
+
+Routine tool completions are left out of all of these; only one that ends a
+wait is shown, as "approved". A prompt the agent's tooling submitted is shown
+dim as a "notice", and does not replace the prompt on the session's row.
 
 A seen mark covers the session up to its last *finish*: an end or a tool event
 arriving later does not make it unseen again, only a new finish does.

@@ -75,6 +75,10 @@ pub struct Event {
     pub pane: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub text: Option<String>,
+    /// A prompt the agent or its tooling submitted, not the person: Claude
+    /// Code's `<task-notification>` when a background task reports back.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub automatic: bool,
 }
 
 fn str_field<'a>(payload: &'a Value, keys: &[&str]) -> Option<&'a str> {
@@ -140,6 +144,13 @@ pub fn plain(text: &str) -> String {
         out.pop();
     }
     out.join(" ")
+}
+
+/// Whether a prompt was submitted by the agent's tooling rather than typed:
+/// those are markup from their first character, once the context blocks an
+/// editor adds are dropped.
+pub fn is_automatic_prompt(prompt: &str) -> bool {
+    drop_context_blocks(prompt).trim_start().starts_with('<')
 }
 
 /// What a person would call the prompt. Context blocks the editor adds are
@@ -258,6 +269,8 @@ pub fn normalize(agent: Agent, event: &str, payload: &Value, now_ms: u64) -> Opt
         agent_pid: None,
         pane: None,
         text,
+        automatic: kind == Kind::Prompt
+            && str_field(payload, &["prompt"]).is_some_and(is_automatic_prompt),
     })
 }
 
@@ -373,6 +386,19 @@ mod tests {
             readable_prompt("use <T> here"),
             "use <T> here",
             "a person's prompt is left alone"
+        );
+        // Such prompts are marked as not typed by the person.
+        let p = json!({"session_id": "s", "prompt": injected});
+        assert!(
+            normalize(Agent::Claude, "UserPromptSubmit", &p, 1)
+                .unwrap()
+                .automatic
+        );
+        let p = json!({"session_id": "s", "prompt": "use <T> here"});
+        assert!(
+            !normalize(Agent::Claude, "UserPromptSubmit", &p, 1)
+                .unwrap()
+                .automatic
         );
     }
 

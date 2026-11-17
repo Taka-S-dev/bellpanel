@@ -978,6 +978,16 @@ fn header(app: &App, now: u64) -> Line<'static> {
     Line::from(spans)
 }
 
+/// The log's label for an event: a prompt the agent's tooling submitted is
+/// a notice, not something the person asked.
+fn event_label(e: &bellpanel::event::Event) -> &'static str {
+    if e.automatic {
+        "notice"
+    } else {
+        kind_label(e.kind)
+    }
+}
+
 fn kind_label(kind: Kind) -> &'static str {
     match kind {
         Kind::Start => "start",
@@ -1024,6 +1034,7 @@ fn event_log(
             .map(|e| {
                 // The person's words stand out; replies and the rest are quieter.
                 let text = match e.kind {
+                    Kind::Prompt if e.automatic => Span::styled(text_of(e), dim),
                     Kind::Prompt => {
                         Span::styled(text_of(e), Style::new().add_modifier(Modifier::BOLD))
                     }
@@ -1032,7 +1043,7 @@ fn event_log(
                 };
                 Line::from(vec![
                     Span::styled(format!("{:>4} ", age(now, e.at)), dim),
-                    Span::styled(pad(kind_label(e.kind), 9), dim),
+                    Span::styled(pad(event_label(e), 9), dim),
                     text,
                 ])
             })
@@ -1047,7 +1058,7 @@ fn event_log(
                     Span::styled(format!("{:>4} ", age(now, e.at)), dim),
                     agent_cell(e.agent, app.settings.icons),
                     Span::raw(pad(bellpanel::state::folder_of(&e.cwd), 20)),
-                    Span::raw(pad(kind_label(e.kind), 9)),
+                    Span::raw(pad(event_label(e), 9)),
                     Span::styled(text_of(e), dim),
                 ])
             })
@@ -1107,7 +1118,7 @@ fn latest_events(
                 Span::styled(format!("{:>4} ", age(now, e.at)), dim),
                 agent_cell(s.agent, app.settings.icons),
                 Span::raw(pad(s.folder(), 20)),
-                Span::styled(kind_label(e.kind), dim),
+                Span::styled(event_label(e), dim),
             ];
             // A finish without a text (Copilot's) says nothing; what was
             // asked tells what the session did.
@@ -1115,6 +1126,7 @@ fn latest_events(
                 (t, Kind::Stop, Some(prompt)) if t.is_empty() => {
                     (format!("> {}", plain(prompt)), dim)
                 }
+                (t, Kind::Prompt, _) if e.automatic => (t, dim),
                 (t, Kind::Prompt, _) => (t, Style::new().add_modifier(Modifier::BOLD)),
                 (t, Kind::Waiting, _) => (t, Style::new().fg(WAIT_COLOR)),
                 (t, _, _) => (t, Style::new()),

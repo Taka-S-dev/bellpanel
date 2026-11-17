@@ -195,6 +195,7 @@ mod tests {
             agent_pid: None,
             pane: None,
             text: None,
+            automatic: false,
         }
     }
 

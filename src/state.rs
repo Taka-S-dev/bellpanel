@@ -313,6 +313,9 @@ impl Board {
             Kind::End => State::Ended,
         };
         match event.kind {
+            // The row shows what the person last asked, not a notice the
+            // agent's tooling submitted.
+            Kind::Prompt if event.automatic => entry.detail = None,
             Kind::Prompt => {
                 entry.prompt = event.text.clone().or(entry.prompt.take());
                 entry.detail = None;
@@ -401,6 +404,7 @@ impl Board {
             agent_pid: None,
             pane: None,
             text: None,
+            automatic: false,
         };
         s.log.push_back(event.clone());
         if s.log.len() > SESSION_LOG_LINES {
@@ -544,6 +548,7 @@ mod tests {
             agent_pid: None,
             pane: None,
             text: None,
+            automatic: false,
         }
     }
 
@@ -565,6 +570,21 @@ mod tests {
         assert_eq!(b.attention_count(20_000), 1);
         b.acknowledge(&(Agent::Claude, "a".into()));
         assert_eq!(b.attention_count(20_000), 0);
+    }
+
+    #[test]
+    fn a_notice_from_the_tooling_does_not_replace_the_persons_prompt() {
+        let mut b = Board::default();
+        let mut asked = ev(Agent::Claude, "a", Kind::Prompt, 1_000);
+        asked.text = Some("fix the build".into());
+        b.apply(&asked);
+        let mut notice = ev(Agent::Claude, "a", Kind::Prompt, 5_000);
+        notice.text = Some("Background command finished".into());
+        notice.automatic = true;
+        b.apply(&notice);
+        let rows = b.rows(5_000);
+        assert_eq!(rows[0].prompt.as_deref(), Some("fix the build"));
+        assert_eq!(rows[0].state, State::Working);
     }
 
     #[test]
