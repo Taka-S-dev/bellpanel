@@ -186,6 +186,14 @@ pub fn readable_prompt(prompt: &str) -> String {
 pub fn classify(agent: Agent, event: &str, payload: &Value) -> Option<Kind> {
     let notification_type = str_field(payload, &["notification_type", "notificationType"]);
     match (agent, event) {
+        // Claude Code also sends SessionStart when it compacts the
+        // conversation, which can happen in the middle of a turn: the session
+        // goes on as it was.
+        (_, "SessionStart" | "sessionStart")
+            if str_field(payload, &["source"]) == Some("compact") =>
+        {
+            None
+        }
         (_, "SessionStart" | "sessionStart") => Some(Kind::Start),
         (_, "UserPromptSubmit" | "userPromptSubmitted") => Some(Kind::Prompt),
         (_, "PostToolUse" | "postToolUse") => Some(Kind::Resumed),
@@ -363,6 +371,21 @@ mod tests {
             normalize(Agent::Claude, "Stop", &json!({"cwd":"c"}), 1),
             None
         );
+    }
+
+    #[test]
+    fn compacting_is_not_a_session_start() {
+        let start = |source| {
+            normalize(
+                Agent::Claude,
+                "SessionStart",
+                &json!({"session_id":"s","source":source}),
+                1,
+            )
+            .map(|e| e.kind)
+        };
+        assert_eq!(start("compact"), None);
+        assert_eq!(start("resume"), Some(Kind::Start));
     }
 
     #[test]

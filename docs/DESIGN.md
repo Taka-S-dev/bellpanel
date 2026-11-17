@@ -73,7 +73,7 @@ Unknown events are not written: the hook only registers for the ones below.
 
 | kind | Claude Code | Copilot CLI | Codex |
 | --- | --- | --- | --- |
-| start | `SessionStart` | `sessionStart` | `SessionStart` |
+| start | `SessionStart`, unless its `source` is `compact` | `sessionStart` | `SessionStart` |
 | prompt | `UserPromptSubmit` | `userPromptSubmitted` | `UserPromptSubmit` |
 | waiting | `PermissionRequest`, `Notification` asking for permission | `notification` of type `permission_prompt` / `elicitation_dialog` | `PermissionRequest` |
 | resumed | `PostToolUse` | `postToolUse` | `PostToolUse` |
