@@ -114,9 +114,28 @@ fn drop_context_blocks(text: &str) -> String {
     out
 }
 
-/// Markdown emphasis and code marks, which read as noise in a one-line cell.
+/// Text without the Markdown marks that read as noise once a reply is run
+/// into one line: emphasis and code marks, heading marks, list bullets, and
+/// table pipes and rules. A table's cells are kept, separated by `·`.
 pub fn plain(text: &str) -> String {
-    text.replace("**", "").replace("__", "").replace('`', "")
+    let text = text.replace("**", "").replace("__", "").replace('`', "");
+    let mut out: Vec<&str> = Vec::new();
+    for word in text.split_whitespace() {
+        let markup = word.chars().all(|c| matches!(c, '|' | '-' | ':'));
+        let heading = word.len() <= 6 && word.chars().all(|c| c == '#');
+        if markup && (word.contains('|') || word.len() >= 3) {
+            // A pipe or a rule between cells; one separator for a run of them.
+            if out.last().is_some_and(|last| *last != "·") {
+                out.push("·");
+            }
+        } else if !(heading || word == "-") {
+            out.push(word);
+        }
+    }
+    if out.last() == Some(&"·") {
+        out.pop();
+    }
+    out.join(" ")
 }
 
 /// What a person would call the prompt. Context blocks the editor adds are
@@ -371,6 +390,17 @@ mod tests {
         assert_eq!(readable_prompt(prompt), "切り替わりました。");
         let reminder = "<system-reminder>be brief</system-reminder>\nfix the build";
         assert_eq!(readable_prompt(reminder), "fix the build");
+    }
+
+    #[test]
+    fn headings_bullets_and_tables_read_as_text() {
+        assert_eq!(
+            plain("## 結果 | # | 項目 | 結果 | |---|---|---| | 1 | ビルド | ✅ |"),
+            "結果 · 項目 · 結果 · 1 · ビルド · ✅"
+        );
+        assert_eq!(plain("- one\n- two\n---\nthree"), "one two · three");
+        // Hyphens inside words, negative numbers and a lone colon stay.
+        assert_eq!(plain("re-run -5 : ok"), "re-run -5 : ok");
     }
 
     #[test]
