@@ -27,9 +27,9 @@ const TICK: Duration = Duration::from_millis(250);
 const SPINNER_FRAME: Duration = Duration::from_millis(100);
 /// How often running processes are listed while a session waits.
 const WATCH_EVERY: Duration = Duration::from_secs(1);
-/// Braille dots: one column wide everywhere. The circle quarters used before
-/// mix East Asian ambiguous widths (◐ ◑) with narrow ones (◓ ◒), so a
-/// terminal drawing ambiguous characters wide shifted the row every frame.
+/// Braille dots: one column wide everywhere. Circle quarters mix East Asian
+/// ambiguous widths (◐ ◑) with narrow ones (◓ ◒), so a terminal drawing
+/// ambiguous characters wide would shift the row every frame.
 const SPINNER: [&str; 10] = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
 /// The timeline column: one slot per minute, up to the last half hour.
 const TIMELINE_SLOTS: usize = 30;
