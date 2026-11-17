@@ -43,6 +43,8 @@ pub struct Session {
     pub prompt: Option<String>,
     /// The last reply or the question it is waiting on.
     pub detail: Option<String>,
+    /// The tool that last finished in the turn being worked on.
+    pub tool: Option<String>,
     pub host_pid: Option<u32>,
     pub host_exe: Option<String>,
     pub agent_pid: Option<u32>,
@@ -239,6 +241,7 @@ impl Board {
             last_at: event.at,
             prompt: None,
             detail: None,
+            tool: None,
             host_pid: None,
             host_exe: None,
             agent_pid: None,
@@ -322,21 +325,24 @@ impl Board {
             Kind::Prompt => {
                 entry.prompt = event.text.clone().or(entry.prompt.take());
                 entry.detail = None;
+                entry.tool = None;
             }
+            Kind::Resumed => entry.tool = event.text.clone().or(entry.tool.take()),
             Kind::Start if event.text.is_some() => entry.prompt = event.text.clone(),
             Kind::Waiting => entry.detail = event.text.clone(),
             Kind::Stop => {
                 entry.detail = event.text.clone();
                 entry.finished_at = Some(event.at);
+                entry.tool = None;
             }
             _ => {}
         }
         // A tool finishing does not mean the session is no longer waiting on
         // something else, but it does mean the request it waited on was answered.
-        if event.kind == Kind::Resumed
-            && entry.state != State::Waiting
-            && entry.state != State::Working
-        {
+        // One arriving after the turn finished or the session ended is late,
+        // and reopens nothing. On an idle session it means a turn is running
+        // whose prompt was missed.
+        if event.kind == Kind::Resumed && matches!(entry.state, State::Done | State::Ended) {
             return false;
         }
 
@@ -656,6 +662,20 @@ mod tests {
         assert_eq!(states(&b, 5_000)[0].1, State::Waiting);
         assert!(!b.apply(&ev(Agent::Codex, "a", Kind::Resumed, 9_000)));
         assert_eq!(states(&b, 9_000)[0].1, State::Working);
+    }
+
+    #[test]
+    fn a_tool_finishing_on_an_idle_session_means_it_works() {
+        let mut b = Board::default();
+        b.apply(&ev(Agent::Claude, "a", Kind::Start, 0));
+        let mut tool = ev(Agent::Claude, "a", Kind::Resumed, 5_000);
+        tool.text = Some("Bash".into());
+        assert!(!b.apply(&tool));
+        assert_eq!(states(&b, 5_000)[0].1, State::Working);
+        assert_eq!(b.rows(5_000)[0].tool.as_deref(), Some("Bash"));
+        // The next turn starts without it.
+        b.apply(&ev(Agent::Claude, "a", Kind::Prompt, 9_000));
+        assert_eq!(b.rows(9_000)[0].tool, None);
     }
 
     #[test]

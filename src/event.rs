@@ -218,6 +218,40 @@ pub fn classify(agent: Agent, event: &str, payload: &Value) -> Option<Kind> {
     }
 }
 
+/// What a tool call is about, from the fields agents put in a tool's input.
+const TOOL_INPUT_FIELDS: [&str; 7] = [
+    "command",
+    "file_path",
+    "path",
+    "url",
+    "pattern",
+    "query",
+    "description",
+];
+
+/// A tool call as `Bash: cargo test`: the tool's name and the most telling
+/// field of its input, or the first question of a question to the user.
+/// `None` when the payload names no tool.
+fn tool_summary(payload: &Value) -> Option<String> {
+    let name = str_field(payload, &["tool_name", "toolName"])?;
+    let input = ["tool_input", "toolInput", "toolArgs"]
+        .iter()
+        .find_map(|key| payload.get(key));
+    let about = input.and_then(|input| {
+        input
+            .pointer("/questions/0/question")
+            .and_then(Value::as_str)
+            .or_else(|| str_field(input, &TOOL_INPUT_FIELDS))
+    });
+    Some(match about {
+        Some(about) => format!(
+            "{name}: {}",
+            about.split_whitespace().collect::<Vec<_>>().join(" ")
+        ),
+        None => name.to_string(),
+    })
+}
+
 /// Turns one hook call into an event, or `None` when there is nothing to record.
 ///
 /// `agent` comes from the hook's command line. A camelCase payload overrides
@@ -240,8 +274,10 @@ pub fn normalize(agent: Agent, event: &str, payload: &Value, now_ms: u64) -> Opt
         Kind::Stop => {
             str_field(payload, &["last_assistant_message", "lastAssistantMessage"]).map(plain)
         }
+        // A permission request names its tool and what it would run; a
+        // notification only has its message.
         Kind::Waiting => {
-            str_field(payload, &["message", "tool_name", "toolName"]).map(str::to_string)
+            tool_summary(payload).or_else(|| str_field(payload, &["message"]).map(str::to_string))
         }
         // Why it ended (`clear`, `prompt_input_exit`, `complete`, ...), to tell
         // a closed tab from a cleared conversation afterwards.
@@ -249,7 +285,8 @@ pub fn normalize(agent: Agent, event: &str, payload: &Value, now_ms: u64) -> Opt
         Kind::End => str_field(payload, &["reason"])
             .filter(|r| *r != "other")
             .map(str::to_string),
-        Kind::Resumed => None,
+        // The tool that just finished: what a working session last did.
+        Kind::Resumed => str_field(payload, &["tool_name", "toolName"]).map(str::to_string),
     }
     .map(|t| {
         clip(
@@ -370,6 +407,45 @@ mod tests {
         assert_eq!(
             normalize(Agent::Claude, "Stop", &json!({"cwd":"c"}), 1),
             None
+        );
+    }
+
+    #[test]
+    fn a_permission_request_says_what_it_would_run() {
+        let text =
+            |event, payload: Value| normalize(Agent::Codex, event, &payload, 1).unwrap().text;
+        assert_eq!(
+            text(
+                "PermissionRequest",
+                json!({"session_id":"s","tool_name":"Bash","tool_input":{"command":"cargo  test\n--all"}})
+            )
+            .as_deref(),
+            Some("Bash: cargo test --all")
+        );
+        assert_eq!(
+            text(
+                "PermissionRequest",
+                json!({"session_id":"s","tool_name":"AskUserQuestion","tool_input":{"questions":[{"question":"Which one?"}]}})
+            )
+            .as_deref(),
+            Some("AskUserQuestion: Which one?")
+        );
+        assert_eq!(
+            text(
+                "PermissionRequest",
+                json!({"session_id":"s","tool_name":"Bash"})
+            )
+            .as_deref(),
+            Some("Bash")
+        );
+        // A finished tool keeps only its name.
+        assert_eq!(
+            text(
+                "PostToolUse",
+                json!({"session_id":"s","tool_name":"Bash","tool_input":{"command":"ls"}})
+            )
+            .as_deref(),
+            Some("Bash")
         );
     }
 

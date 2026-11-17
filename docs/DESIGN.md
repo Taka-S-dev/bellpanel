@@ -66,7 +66,7 @@ One JSON object per line, version 1:
 | `host_pid`, `host_exe` | the nearest ancestor process owning a visible window (§5) |
 | `agent_pid` | the agent's own process, to find its tab (§5) |
 | `pane` | `WEZTERM_PANE`, when the window is WezTerm (§5) |
-| `text` | prompt or last reply, cut to 200 characters (the reply to 600) |
+| `text` | the prompt; the last reply; what a wait is for (`Bash: cargo test`: the tool and its command, path or question); the tool a `resumed` event finished. Cut to 200 characters, the reply to 600 |
 | `automatic` | `true` on a prompt the agent's tooling submitted (Claude Code's `<task-notification>`), left out otherwise |
 
 Unknown events are not written: the hook only registers for the ones below.
@@ -160,6 +160,10 @@ Per session, the latest `kind` decides the state:
 | waiting | **waiting** | top of the list |
 | stop | **done** until seen | below waiting |
 | end | ended | hidden after 1 minute, unless it finished and is not yet seen |
+
+A `resumed` event on an idle session makes it working: a turn is running
+whose prompt was missed. On a finished or ended one it is late and changes
+nothing.
 
 A session with no window (an agent run by a script, `claude -p`) is hidden a
 minute after it ends even when its finish was not seen: nobody is waiting for

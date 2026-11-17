@@ -20,6 +20,9 @@ the terminal bell, and going to the room is one click.
 The column after the agent is the app the session runs in: `code` (VS Code),
 `wt` (Windows Terminal), `wez` (WezTerm), `obs` (Obsidian).
 
+- A waiting row says what it waits for (`Bash: cargo test`), and a working
+  row the tool it last finished and how long ago, so you can tell a session
+  that is getting on from one that is stuck.
 - A session you have dealt with (seen, or idle) leaves the list 30 minutes
   after it last did something, and comes back when it does something new.
 - Sessions keep their place, in the order they appeared, so a row never moves

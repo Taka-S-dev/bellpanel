@@ -1062,6 +1062,11 @@ fn session_line(
     if timeline > 0 {
         spans.extend(timeline_spans(session, now, timeline));
     }
+    // A working session's last finished tool, and how long ago: whether it
+    // is getting on, without opening it.
+    if let (State::Working, Some(tool)) = (session.state, &session.tool) {
+        spans.push(Span::raw(format!("{tool} {}  ", age(now, session.last_at))));
+    }
     match (session.state, &session.detail, &session.prompt) {
         (State::Waiting | State::Done, Some(detail), _) => spans.push(Span::raw(plain(detail))),
         (_, _, Some(prompt)) => spans.push(Span::styled(format!("> {}", plain(prompt)), dim)),
@@ -1641,6 +1646,18 @@ mod tests {
                     .collect()
             })
             .collect()
+    }
+
+    #[test]
+    fn a_working_row_names_the_tool_it_last_finished() {
+        let now = now_ms();
+        let mut app = app_with(&[
+            event("api", Kind::Prompt, now - 9_000, "fix the login"),
+            event("api", Kind::Resumed, now - 3_000, "Bash"),
+        ]);
+        let rows = screen(&mut app, 140, 12);
+        let row = rows.iter().find(|r| r.contains("api")).unwrap();
+        assert!(row.contains("Bash 3s  > fix the login"), "{row}");
     }
 
     #[test]
