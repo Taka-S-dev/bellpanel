@@ -1384,6 +1384,19 @@ fn draw(frame: &mut ratatui::Frame, app: &mut App) {
                 Span::raw(format!(" in {target}")),
             ])
         }
+        // On a finish not yet seen, the keys that deal with it.
+        (None, None)
+            if app
+                .selected
+                .as_ref()
+                .and_then(|k| rows.iter().find(|s| s.key() == *k))
+                .is_some_and(|s| s.state == State::Done && !s.seen) =>
+        {
+            Line::styled(
+                format!(" space: mark seen · d: hide · {HELP}"),
+                Style::new().add_modifier(Modifier::DIM),
+            )
+        }
         (None, None) => Line::styled(format!(" {HELP}"), Style::new().add_modifier(Modifier::DIM)),
     };
     frame.render_widget(Paragraph::new(foot), foot_area);
