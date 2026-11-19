@@ -272,9 +272,10 @@ about two seconds (§6, An approved command).
 ## 8. Silent failures to surface
 
 Copilot and Codex skip hooks they do not trust, without a word on screen. So
-the header shows, per agent, when its last event arrived, and "never" in
-place of a time. "codex: never" right after installing means its hooks still
-need trusting with `/hooks`.
+the header shows "never" for an agent with bellpanel's hooks and no event on
+file. "codex never" right after installing means its hooks still need
+trusting with `/hooks`. Other agents are in the header only while one of
+their sessions is in the list, with the time of their last event.
 
 ## 9. Install
 

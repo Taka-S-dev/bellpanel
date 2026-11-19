@@ -1169,13 +1169,14 @@ fn header(app: &App, now: u64) -> Line<'static> {
     count(done, "done", Some(DONE_COLOR));
     count(working, "working", None);
     spans.push(Span::raw("   "));
-    // An agent that has never reported usually has untrusted or missing hooks
-    // (DESIGN.md §8), so "never" is shown rather than left out. Agents without
-    // our hooks are not listed at all, unless events from them are on file.
-    for agent in Agent::ALL
-        .into_iter()
-        .filter(|a| app.agents.contains(a) || app.board.last_seen(*a).is_some())
-    {
+    // Only the agents with a row in the list, so one last used days ago does
+    // not take up the header. An agent that has never reported usually has
+    // untrusted or missing hooks (DESIGN.md §8), so it is listed too, as
+    // "never".
+    for agent in Agent::ALL.into_iter().filter(|a| {
+        rows.iter().any(|s| s.agent == *a)
+            || (app.agents.contains(a) && app.board.last_seen(*a).is_none())
+    }) {
         let label = if app.settings.icons {
             format!("{} {}", agent_icon(agent), agent.name())
         } else {
@@ -1744,6 +1745,25 @@ mod tests {
             app.board.apply(e);
         }
         app
+    }
+
+    #[test]
+    fn the_header_lists_agents_with_a_row_and_ones_never_heard_from() {
+        const MIN: u64 = 60_000;
+        let old = bellpanel::event::Event {
+            agent: Agent::Copilot,
+            ..event("b", Kind::Stop, 0, "")
+        };
+        let mut app = app_with(&[old, event("a", Kind::Prompt, 24 * 60 * MIN, "go")]);
+        app.agents = Agent::ALL.to_vec();
+        let text: String = header(&app, 24 * 60 * MIN)
+            .spans
+            .iter()
+            .map(|s| s.content.as_ref())
+            .collect();
+        assert!(text.contains("claude 0s"), "{text}");
+        assert!(text.contains("codex never"), "{text}");
+        assert!(!text.contains("copilot"), "{text}");
     }
 
     /// The screen as text, one string per row.
