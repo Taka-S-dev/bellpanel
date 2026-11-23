@@ -1169,27 +1169,26 @@ fn header(app: &App, now: u64) -> Line<'static> {
     count(done, "done", Some(DONE_COLOR));
     count(working, "working", None);
     spans.push(Span::raw("   "));
-    // Only the agents with a row in the list, so one last used days ago does
-    // not take up the header. An agent that has never reported usually has
-    // untrusted or missing hooks (DESIGN.md §8), so it is listed too, as
-    // "never".
-    for agent in Agent::ALL.into_iter().filter(|a| {
-        rows.iter().any(|s| s.agent == *a)
-            || (app.agents.contains(a) && app.board.last_seen(*a).is_none())
-    }) {
+    // Only the agents with a row in the list: one last used days ago, or
+    // set up and not used, would only take up the header.
+    for agent in Agent::ALL
+        .into_iter()
+        .filter(|a| rows.iter().any(|s| s.agent == *a))
+    {
         let label = if app.settings.icons {
             format!("{} {}", agent_icon(agent), agent.name())
         } else {
             agent.name().to_string()
         };
         spans.push(Span::styled(label, Style::new().fg(agent_color(agent))));
-        match app.board.last_seen(agent) {
-            Some(at) => spans.push(Span::styled(
-                format!(" {}  ", age(now, at)),
-                Style::new().add_modifier(Modifier::DIM),
-            )),
-            None => spans.push(Span::styled(" never  ", Style::new().fg(WAIT_COLOR))),
-        }
+        let last = app
+            .board
+            .last_seen(agent)
+            .map_or(String::new(), |at| age(now, at));
+        spans.push(Span::styled(
+            format!(" {last}  "),
+            Style::new().add_modifier(Modifier::DIM),
+        ));
     }
     Line::from(spans)
 }
@@ -1748,7 +1747,7 @@ mod tests {
     }
 
     #[test]
-    fn the_header_lists_agents_with_a_row_and_ones_never_heard_from() {
+    fn the_header_lists_only_agents_with_a_row() {
         const MIN: u64 = 60_000;
         let old = bellpanel::event::Event {
             agent: Agent::Copilot,
@@ -1762,7 +1761,7 @@ mod tests {
             .map(|s| s.content.as_ref())
             .collect();
         assert!(text.contains("claude 0s"), "{text}");
-        assert!(text.contains("codex never"), "{text}");
+        assert!(!text.contains("codex"), "{text}");
         assert!(!text.contains("copilot"), "{text}");
     }
 

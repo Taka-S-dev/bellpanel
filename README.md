@@ -88,8 +88,8 @@ Then:
 3. Run `bellpanel` in the terminal you keep open.
 
 The header shows when each agent with a session in the list last reported.
-An agent that has not reported at all is shown as `never`: if it stays so
-after you have used it, its hooks are missing or not trusted.
+An agent whose sessions do not show up after you have used it has hooks that
+are missing or not trusted.
 
 `bellpanel uninstall` removes only bellpanel's hooks.
 
