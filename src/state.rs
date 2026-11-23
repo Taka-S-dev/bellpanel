@@ -62,6 +62,8 @@ pub struct Session {
     log: VecDeque<Event>,
     last_kind: Kind,
     last_turn: Option<String>,
+    /// Whether anything but its start and end has been reported.
+    used: bool,
 }
 
 /// One column of a session's timeline.
@@ -260,6 +262,7 @@ impl Board {
             log: VecDeque::new(),
             last_kind: Kind::Start,
             last_turn: None,
+            used: false,
         });
 
         self.last_by_agent
@@ -298,6 +301,7 @@ impl Board {
         }
         entry.last_at = entry.last_at.max(event.at);
         entry.last_kind = event.kind;
+        entry.used |= !matches!(event.kind, Kind::Start | Kind::End);
         entry.last_turn = event.turn.clone();
 
         match event.kind {
@@ -481,11 +485,15 @@ impl Board {
             .is_some_and(|&at| s.last_at <= at)
     }
 
-    /// Whether a current session is left out of the list: dismissed, or
-    /// with nothing for the user for `QUIET_VISIBLE_MS`.
+    /// Whether a current session is left out of the list: dismissed, with
+    /// nothing for the user for `QUIET_VISIBLE_MS`, or started and not used
+    /// yet. An editor extension can start several sessions for the one the
+    /// user opens, and only the one given a prompt is theirs.
     pub fn is_hidden(&self, s: &Session, now: u64) -> bool {
         let quiet = s.state == State::Idle || (s.state == State::Done && s.seen);
-        (quiet && now.saturating_sub(s.last_at) >= QUIET_VISIBLE_MS) || self.is_dismissed(s)
+        (quiet && now.saturating_sub(s.last_at) >= QUIET_VISIBLE_MS)
+            || self.is_dismissed(s)
+            || !s.used
     }
 
     /// How many current sessions are hidden.
@@ -644,12 +652,11 @@ mod tests {
     #[test]
     fn quiet_rows_leave_the_list_and_come_back_with_new_activity() {
         let mut b = Board::default();
-        b.apply(&ev(Agent::Claude, "idle", Kind::Start, 0));
         b.apply(&ev(Agent::Claude, "seen", Kind::Stop, 0));
         b.acknowledge(&(Agent::Claude, "seen".into()));
         b.apply(&ev(Agent::Claude, "unseen", Kind::Stop, 0));
-        assert_eq!(states(&b, QUIET_VISIBLE_MS - 1).len(), 3);
-        // Idle and seen rows go; a finish nobody has looked at stays.
+        assert_eq!(states(&b, QUIET_VISIBLE_MS - 1).len(), 2);
+        // A seen row goes; a finish nobody has looked at stays.
         let left: Vec<String> = states(&b, QUIET_VISIBLE_MS)
             .into_iter()
             .map(|(id, _)| id)
@@ -657,11 +664,25 @@ mod tests {
         assert_eq!(left, ["unseen"]);
         b.apply(&ev(
             Agent::Claude,
-            "idle",
+            "seen",
             Kind::Prompt,
             QUIET_VISIBLE_MS + 1,
         ));
         assert_eq!(states(&b, QUIET_VISIBLE_MS + 1).len(), 2);
+    }
+
+    #[test]
+    fn a_session_is_listed_from_its_first_prompt() {
+        let mut b = Board::default();
+        b.apply(&ev(Agent::Claude, "spare", Kind::Start, 0));
+        b.apply(&ev(Agent::Claude, "spare", Kind::End, 2_000));
+        b.apply(&ev(Agent::Claude, "mine", Kind::Start, 0));
+        assert!(b.rows(3_000).is_empty());
+        assert_eq!(b.hidden_count(3_000), 2);
+        b.apply(&ev(Agent::Claude, "mine", Kind::Prompt, 4_000));
+        assert_eq!(states(&b, 4_000), [("mine".into(), State::Working)]);
+        b.show_hidden = true;
+        assert_eq!(b.rows(4_000).len(), 2);
     }
 
     #[test]
@@ -826,7 +847,7 @@ mod tests {
     #[test]
     fn ended_and_stale_sessions_drop_out() {
         let mut b = Board::default();
-        b.apply(&ev(Agent::Claude, "ended", Kind::Start, 0));
+        b.apply(&ev(Agent::Claude, "ended", Kind::Prompt, 0));
         b.apply(&ev(Agent::Claude, "ended", Kind::End, 0));
         b.apply(&ev(Agent::Claude, "old", Kind::Prompt, 0));
         assert_eq!(states(&b, ENDED_VISIBLE_MS - 1).len(), 2);

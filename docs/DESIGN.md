@@ -155,7 +155,7 @@ Per session, the latest `kind` decides the state:
 
 | last kind | state | shown as |
 | --- | --- | --- |
-| start | idle | dim |
+| start | idle | hidden until its first other event |
 | prompt, resumed | working | spinner |
 | waiting | **waiting** | top of the list |
 | stop | **done** until seen | below waiting |
@@ -172,6 +172,14 @@ either. That is off by default, because a session whose window the hook
 could not find would go with them. A session with no event for 12 hours is hidden. One with nothing for the
 user, idle or finished and seen, is hidden 30 minutes after its last event and
 comes back with its next one.
+
+A session that has reported nothing but its start, and perhaps its end, is
+hidden from the beginning and listed from its next event, as a rule its
+first prompt. Observed 2026-11-23: the Claude Code extension for VS Code
+started five sessions at once in the folder being opened, and five more in
+a folder of its own that ended within three seconds; only one of the ten
+was given a prompt. `a` lists hidden rows of all three kinds, dim, and the
+title counts them.
 
 Rows are listed in the order sessions appeared, so none moves while the
 pointer is on its way to it; waiting and unseen finishes stand out by colour

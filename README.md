@@ -23,9 +23,12 @@ The column after the agent is the app the session runs in: `code` (VS Code),
 - A waiting row says what it waits for (`Bash: cargo test`), and a working
   row the tool it last finished and how long ago, so you can tell a session
   that is getting on from one that is stuck.
-- A session you have dealt with (seen, or idle) leaves the list 30 minutes
-  after it last did something, and comes back when it does something new.
-  The title counts the rows left out, and `a` lists them too.
+- A session is listed once it does something, as a rule from its first
+  prompt: one that has only started is left out, since an editor extension
+  can start several for the one you open.
+- A finished session you have seen leaves the list 30 minutes after it last
+  did something, and comes back when it does something new. The title
+  counts the rows left out, and `a` lists them too.
 - Sessions keep their place, in the order they appeared, so a row never moves
   as you reach for it. Press `s` to sort by urgency instead (waiting first,
   then unseen finishes, newest first); the choice is remembered. In either
@@ -103,7 +106,7 @@ are missing or not trusted.
 | `Space` | mark a finished session as seen |
 | `A` | mark every finished session as seen |
 | `d` | hide the row until the session does something new; on a hidden row, bring it back |
-| `a` | list hidden rows too, dim: the ones you hid, and the ones quiet for 30 minutes |
+| `a` | list hidden rows too, dim: the ones you hid, the ones quiet for 30 minutes, and the ones started and not used yet |
 | `e` | event log: the selected session's conversation → each session's latest event, wrapped → every session's events → hidden |
 | `s` | switch between arrival order and urgency order |
 | `m` | bell: for waits and finishes → for waits only → off |
